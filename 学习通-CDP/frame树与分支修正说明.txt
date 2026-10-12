@@ -1,0 +1,278 @@
+﻿================================================================================
+frame 树实测 + chain() 分支修正说明
+生成时间：2026-09-26 02:09:28
+页面：https://mooc1.chaoxing.com/mycourse/studentstudy（学习通学生课程页）
+复现：node _实验\_框树.js --match=chapterId=<章节号>     只读，不点任何东西
+================================================================================
+
+一、完整 frame 树（Page.getFrameTree，共 15 个 frame）
+--------------------------------------------------------------------------------
+深度用缩进表示；★ 标的是挂着 <video> / .video-js 的那一条分支。
+
+调试端口 9222 上有 2 个 page 标签页：
+  [0] 学生学习页面   https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&clazzid=153929011&cpi=566261411&enc=3f98c…
+  [1] 个人空间   https://i.chaoxing.com/base?ws=1&t=1790357146898
+
+══════════════════════════════════════════════════════════════════
+标签页: 学生学习页面
+   URL : https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&clazzid=153929011&cpi=566261411&enc=3f98ca6436f847b69a7397f0cfe66391&mooc2=1&hidetype=0&fanyaVersion=0&openc=9068bf7616f3ed571408a1f504c3a6ae
+    id : B3B6BE86E5377C6B00E219C5AA208E33
+
+--- frame 树（共 15 个 frame）---
+[ 1] └─ text/html  depth=0  frameId=B3B6BE86E5377C6B00E219C5AA208E33
+     url: https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&clazzid=153929011&cpi=566261411&enc=3f98ca6436f847b69a7397f0c…
+     本层: media=0  .video-js类=0  iframe=7  ready=complete  正文“返回课程 章节详情 函数微分的定义及几何意义 下一节 上一节 目录 讨论 笔记 …”
+    [ 2] ├─ name="reportFrame"  text/html  depth=1  frameId=DEDCA2CC1E0E7D19AE626F91CD435B3D
+         url: about:blank
+         本层: media=0  .video-js类=0  iframe=0  ready=complete
+    [ 3] ├─ name="popFrameId"  text/html  depth=1  frameId=3BD53E6F079612960FC822F137A53E32
+         url: about:blank
+         本层: media=0  .video-js类=0  iframe=0  ready=complete
+    [ 4] ├─ name="hidePopFrameId"  text/html  depth=1  frameId=B7B3678C3C4A55D07E45457BED6D4A96
+         url: about:blank
+         本层: media=0  .video-js类=0  iframe=0  ready=complete
+    [ 5] ├─ name="voteIframe"  text/html  depth=1  frameId=EE298F4B18F8A718D42014D8AC141A4A
+         url: about:blank
+         本层: media=0  .video-js类=0  iframe=0  ready=complete
+    [ 6] ├─ text/html  depth=1  frameId=58A96D859EC93779B087A2F38A52AED8
+         url: about:blank
+         本层: media=0  .video-js类=0  iframe=0  ready=complete
+    [ 7] ├─ name="ueditor_0"  text/html  depth=1  frameId=6948F380AEE73274377A65FEB0B0CFBF
+         url: about:blank
+         本层: media=0  .video-js类=0  iframe=0  ready=complete
+    [ 8] ├─ name="iframe"  text/html  depth=1  frameId=F6477F3958440080BA8102BAEE490899   ★ <AUDIO>
+         url: https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&knowledgeid=1227808599&num=0&ut=s&cpi=&v=2025-0424-1038-3&moo…
+         本层: media=1  .video-js类=0  iframe=2  ready=complete  正文“学习目标： 1,什么是微分？可微是什么意思？ 2,函数具有什么性质才可微？ 3,…”
+        [ 9] ├─ text/html  depth=2  frameId=F8DF95F3A557B6DF61D3AB64E21343E8
+             url: https://mooc1.chaoxing.com/ananas/modules/pdf/index.html?v=2026-0826-1905
+             本层: media=0  .video-js类=0  iframe=4  ready=complete  正文“不懂 知识点: 函数微分的定义及几何意义”
+            [10] ├─ name="document_content_1"  text/html  depth=3  frameId=24CBC31D1340ABE61213AC998A8B249E
+                 url: about:blank
+                 本层: media=0  .video-js类=0  iframe=0  ready=complete
+            [11] ├─ name="document_content_2"  text/html  depth=3  frameId=0B061BA7E2C1BDDF9D10C122779E6C85
+                 url: about:blank
+                 本层: media=0  .video-js类=0  iframe=0  ready=complete
+            [12] ├─ name="wpsView"  text/html  depth=3  frameId=030DBF8D17BB23A57A7C61A8763C97E5
+                 url: about:blank
+                 本层: media=0  .video-js类=0  iframe=0  ready=complete
+            [13] ├─ name="panView"  text/html  depth=3  frameId=7ECDEBDB06B40B2056BBFF3555554CB3
+                 url: https://pan-yz.chaoxing.com/screen/v2/file_881c7322e1c2a9ec17e23e53f6cf4bd1?ext=%7B%22_from_%22%3A%22266357289_153929011_465909218_3f98ca6436f847b69a7…
+                 本层: media=0  .video-js类=0  iframe=0  ready=complete  正文“1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 1…”
+        [14] ├─ text/html  depth=2  frameId=3E548D8C5F2FD0F3BF75D488A1667CF2   ★ <VIDEO(video-js内)> .video-js×8
+             url: https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2026-0901-1154
+             本层: media=1  .video-js类=8  iframe=1  ready=complete  正文“播放视频 写笔记 可边看边记，笔记会标记视频时间点 知道了 知识点 函数微分的定…”
+            [15] ├─ name="mindmap"  text/html  depth=3  frameId=9ABEB14BDC526971993DE909A99925B5
+                 url: about:blank
+                 本层: media=0  .video-js类=0  iframe=0  ready=complete
+
+--- 有 media / .video-js 的 frame 详情 ---
+  frame #14  https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2026-0901-1154
+    frameId: 3E548D8C5F2FD0F3BF75D488A1667CF2
+    <VIDEO> class="vjs-tech" 844x474  inVideoJs=true
+       src       : https://s2.cldisk.com/sv-w9/video/7f/66/eb/99513c1b843e002df4f3f0af1713d656/sd.m
+       currentSrc: https://s2.cldisk.com/sv-w9/video/7f/66/eb/99513c1b843e002df4f3f0af1713d656/sd.m
+       父元素    : <DIV class="video-js vjs-default-skin vjs-big-play-centered vjs-paused v">
+       祖父      : <DIV class="">
+    .video-js类: <STYLE class="vjs-styles-defaults" 0x0 @0,0>
+    .video-js类: <STYLE class="vjs-styles-dimensions" 0x0 @0,0>
+    .video-js类: <DIV class="video-js vjs-default-skin vjs-big-play-centered vjs-paused v" 844x474 @0,0>
+    .video-js类: <VIDEO class="vjs-tech" 844x474 @0,0>
+
+  frame #8  https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&knowledgeid=1227808599&num=0&ut…
+    frameId: F6477F3958440080BA8102BAEE490899
+    <AUDIO> class="" 0x0  inVideoJs=false
+       src       : (空)
+       currentSrc: (空)
+       父元素    : <DIV class="wrap ">
+       祖父      : <BODY class="x-body x-webkit x-chrome">
+
+--- 每层文档里的 iframe 元素（DOM 视角）---
+  frame #14 (: https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2026-0901-1154) 有 1 个 iframe 元素，CDP 记到这个 frame 的子 frame 有 1 个
+     iframe[0] id="mindmap" class="" 0x0 @0,0
+              src=(空)
+              → 对应 CDP 子 frame #15  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+  frame #9 (: https://mooc1.chaoxing.com/ananas/modules/pdf/index.html?v=2026-0826-1905) 有 4 个 iframe 元素，CDP 记到这个 frame 的子 frame 有 4 个
+     iframe[0] id="wpsView" class="" 0x0 @0,0
+              src=(空)
+              → 对应 CDP 子 frame #10  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[1] id="panView" class="" 848x550 @0,0
+              src=https://mooc1.chaoxing.com/mooc-ans/screen/file?objectid=881c7322e1c2a9ec17e23e53f6cf4bd1&
+              → 对应 CDP 子 frame #11  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[2] id="document_content_1" class="" 0x0 @0,0
+              src=(空)
+              → 对应 CDP 子 frame #12  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[3] id="document_content_2" class="" 0x0 @0,0
+              src=(空)
+              → 对应 CDP 子 frame #13  https://pan-yz.chaoxing.com/screen/v2/file_881c7322e1c2a9ec17e23e53f6cf4bd1?ext=%7B%22_from_%22%3A%2…
+              → 那一层：media=0  .video-js类=0  iframe=0
+  frame #8 (: https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&k…) 有 2 个 iframe 元素，CDP 记到这个 frame 的子 frame 有 2 个
+     iframe[0] id="" class="ans-attach-online insertdoc-online-pdf" 845x707 @100,215
+              src=/ananas/modules/pdf/index.html?v=2026-0826-1905
+              → 对应 CDP 子 frame #9  https://mooc1.chaoxing.com/ananas/modules/pdf/index.html?v=2026-0826-1905
+              → 那一层：media=0  .video-js类=0  iframe=4
+     iframe[1] id="" class="ans-attach-online ans-insertvideo-online" 845x672 @100,969
+              src=/ananas/modules/video/index.html?v=2026-0901-1154
+              → 对应 CDP 子 frame #14  https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2026-0901-1154
+              → 那一层：media=1  .video-js类=8  iframe=1   ★ 有 <VIDEO>（在 .video-js 里）
+  frame #1 (: https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&c…) 有 7 个 iframe 元素，CDP 记到这个 frame 的子 frame 有 7 个
+     iframe[0] id="iframe" class="" 1038x1756 @0,-817
+              src=/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&knowledgeid=1227808599&num=
+              → 对应 CDP 子 frame #2  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[1] id="ueditor_0" class="" 0x0 @0,0
+              src=javascript:void(function(){document.open();document.write("<!DOCTYPE html><html xmlns='htt
+              → 对应 CDP 子 frame #3  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[2] id="reportFrame" class="" 0x0 @0,0
+              src=(空)
+              → 对应 CDP 子 frame #4  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[3] id="popFrameId" class="" 0x0 @0,0
+              src=(空)
+              → 对应 CDP 子 frame #5  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[4] id="hidePopFrameId" class="" 0x0 @0,0
+              src=(空)
+              → 对应 CDP 子 frame #6  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[5] id="voteIframe" class="" 0x0 @0,0
+              src=(空)
+              → 对应 CDP 子 frame #7  about:blank
+              → 那一层：media=0  .video-js类=0  iframe=0
+     iframe[6] id="" class="edui-default" 0x0 @0,0
+              src=about:blank
+              → 对应 CDP 子 frame #8  https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&knowledgeid…
+              → 那一层：media=1  .video-js类=0  iframe=2   ★ 有 <AUDIO>
+
+--- 结论：哪一条分支挂着播放器 ---
+  #1  →  #8  →  #14   （第 2 层）
+    顶层 frame#1  media=0 .video-js=0 iframe=7  url=https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&c…
+    第1层 frame#8  media=1 .video-js=0 iframe=2  url=https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&k…
+    第2层 frame#14  media=1 .video-js=8 iframe=1  url=https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2026-0901-1154
+  #1  →  #8   （第 1 层）
+    顶层 frame#1  media=0 .video-js=0 iframe=7  url=https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&c…
+    第1层 frame#8  media=1 .video-js=0 iframe=2  url=https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&k…
+══════════════════════════════════════════════════════════════════
+
+
+二、结论：video-js 播放器挂在哪一条分支上
+--------------------------------------------------------------------------------
+  顶层  studentstudy（#iframe 的宿主）
+   └─ #iframe                                    → /mooc-ans/knowledge/cards     （知识卡片页，d1）
+        ├─ iframe.ans-attach-online.insertdoc-online-pdf    → /ananas/modules/pdf    ← 先出现的岔路，没有播放器
+        └─ iframe.ans-attach-online.ans-insertvideo-online  → /ananas/modules/video  ← ★ 播放器在这一支
+             └─ div.video-js.vjs-default-skin > video.vjs-tech  ← 真正的 <video>（844x474）
+
+  关键事实：两个卡片 iframe 是**兄弟节点**，class 前缀一模一样（都是 ans-attach-online），
+  而 PDF 卡片在 DOM 里排在前面。所以"取第一个匹配 ans-attach-online 的 iframe"
+  必然一头扎进 PDF 那一支 —— 那一支里连 .vjs-big-play-button 都不存在。
+
+三、老 chain() 到底断在哪（实测轨迹）
+--------------------------------------------------------------------------------
+  第0层 顶层       media=0   → 取 #iframe          进入 cards
+  第1层 cards      media=1   → 只有一个 <audio id="auditionAudio">（0x0、src=""、readyState=0）
+                                isRealMedia() 判它"不是真播放器"，正确跳过
+                             → 取 iframe.ans-attach-online
+                                ★ 命中的是 PDF 卡片（DOM 里排第一），不是视频卡片
+  第2层 PDF 卡片   media=0   → 取 iframe → 钻进 panView（跨域空文档）
+  第3层 about:blank          → 没有 iframe，遍历结束
+  结果：v = null → 日志刷「本节没有可播的内容」，然后一直点「下一节」
+
+  连带发现的第二个问题：就算找对了播放器，以前也不点得动。
+  视频卡在 cards 里位于 y=969，视口只有 959 高 —— 不先滚进视口就直接点，
+  点的是屏幕外面，日志里那句「找不到可点的播放键」就是这么来的。
+
+四、这次的改动（driver.js）
+--------------------------------------------------------------------------------
+  1) chain() 下降顺序改成"按哪一支可能是播放器"排：
+       iframe.ans-insertvideo-online  >  id/src 含 video  >  音频卡  >  文档卡  >  兜底
+     这样才会跟着播放器那条分支走，而不是撞上第一个同前缀的兄弟节点。
+  2) 走错支路不再默默返回 null：chain() 带回 f2sel / depthReached / d2，
+     PROBE 把"走的哪条支路、落到哪个文档、各路 iframe 里有几个 video/播放键"一并报回日志。
+  3) 补上"把播放器滚进视口"：PROBE 先 scrollIntoViewDeep() 再量坐标，
+     并给出 seesBigPlay / seesArea 标记。
+  4) 视口外的坐标一律不点；续播改成按优先级逐个候选试（大播放键→控件栏播放键→画面→容器），
+     每点一次立刻回读确认是否真的播起来。
+  5) PROBE 加了顶层保护：不是顶层文档时直接返回 {notTop:true}，
+     不再把内层 iframe 的坐标当成顶层坐标报出来（那会得到 422,237 这种"看着正常其实是错"的数）。
+
+五、第二轮：用户反馈"视频做完、题没做，它把题一起跳了"
+--------------------------------------------------------------------------------
+  对比了归档里的原始脚本（_旧版与归档\学习通助手.user.js），差别在**怎么判"这一章做完了"**：
+
+  原始脚本（第 1750-1777 行）：
+      const all = taskContainers();          // 这一章所有任务点
+      const pending = pendingTaskPoints();   // 逐个看哪些没带完成类名
+      if (!pending.length) return goNext('任务点已全部完成');
+      if (!all.length) return;               // 没找到任务点 ≠ 做完了，绝不翻页
+    它还有一条明确写下的教训（v2.4）："一个任务容器都没找到，绝不等于任务点全做完，
+    旧版把这两者混为一谈，于是看不见任务点时就直接翻页，成了无限跳章。"
+
+  我们的 driver.js 却是一句全局判定：
+      o.platformDone = querySelectorAll('.ans-job-finished, .ans-job-finish').length > 0;
+    意思变成"这一章**任意一个**任务点完成了 = 整章完成"。学通一章可以有多个任务点
+    （视频 / 文档 / 测验 / 作业），视频做完就整章翻页 —— 题目那个任务点连碰都没碰。
+    这就是"把题一起跳了"。
+
+  改法：
+   1) platformDone 改成**逐个任务点**判：数 total/done/pending，
+      只有 pending===0 才叫全绿；并单独回答"装着视频的那个任务点完成了没"。
+      PROBE 还会把"还没做的是哪几类"（视频/测验/作业/文档）报回日志。
+   2) "视频已完成"那条分支以前**根本不调 tryQuiz**，直接 advance 走人。
+      现在不管视频是"播完的"还是"平台已标记完成的"，都**先交代这一章的测验**，
+      再做文档、最后才翻页。顺序也调了：以前是"先滚文档 → 直接 advance"。
+   3) 加了"这一章的测验做过了吗"判定（照原始脚本 isQuizDone 的三重判定：
+      正文有已答痕迹 / 作答控件全 disabled / 有判分标记），做过的绝不重填。
+   4) 答题助手说"没填上"的时候，不再当成"做完了"：只有真的
+      "已按顺序填进页面"才算 handled；只开了页面没填上叫 opened，
+      照旧记进待办（待办里会写"测验打开过但没填上"）。
+
+六、顺带修掉的三个坑（都是实测撞出来的）
+--------------------------------------------------------------------------------
+  a) 卡片页卡在"章节测验"栏（&num=1）：那一栏**没有视频卡**，驱动器就一路判"没有可播内容"，
+     又去开测验，原地打转。原因是标签页切换用了合成 MouseEvent，对
+     <li onclick="changeDisplayContent(...)"> 不生效。现在改成三招挨个试
+     （el.click() → 合成事件 → 直接求值 onclick），并且**用 src 里的 num 验证到底换没换**；
+     另外每轮自愈：发现 num=1 且那一栏没题，就自己切回"章节"栏。
+  b) 弹窗点不动 + 遮罩：那个"还有任务点未完成"弹窗上盖着一层全屏遮罩
+     （maskDiv jobFinishTip，1470x959，z-index 999）。算出来的坐标
+     (797,849)、(805,704) 命中的全是遮罩，不是按钮 —— 实测 88 次点击，
+     弹窗一次都没消失过。而且弹窗里有些时刻压根没有「下一节」按钮。
+     现在点完**回头验一次**（弹窗还在 + chapterId 没变 = 点不动），连着两次就停下并说清原因。
+     曾经想用页面自己的 PCount.next 硬绕，查了源码后放弃：
+       PCount.next(count, chapterId, courseId, clazzid, knowledgestr, checkType)
+     只有 cur >= count 才真的 POST /mycourse/changeCapter 换章，
+     乱传参数只会把卡片切到测验栏（不换章）。硬绕等于伪造进度，不做。
+  c) 答题期间主循环抢页面：tryQuiz 要跑十几秒（切栏、截图、问模型、填答案），
+     这段时间主循环会一边判"这一章没内容"一边点「下一节」，等回头填答案时
+     题目控件已经被翻走了（日志里"页面上共 0 题"就是这么来的）。
+     现在答题期间主循环只等不动（quizBusy）。
+
+七、实测（这一版真的把题填进去了）
+--------------------------------------------------------------------------------
+  [02:57:34] → 已按顺序填进页面：第1题=B，第2题=ABCD，第3题=对
+  [02:57:34] → 已点「暂时保存」(noSubmit();)，页面出现「保存成功」
+  [02:57:35] ↳ 这一章的测验已经填进去了，再翻页
+  对照第一轮（改之前）：同一章被整章跳过，题目一个字都没碰。
+
+  真正过不去的章节现在会停下并说清楚，不再空转：
+  [02:58:47] ⚠ 弹窗点不动：连着 2 次点了「下一节」，弹窗还在、章节也没换（chapterId 还是 1251199226）
+  [02:58:47]   原因：弹窗上面盖着一层全屏遮罩（maskDiv jobFinishTip），页面内点击被它接住了
+  [02:58:47]   这时平台连顶层「下一节」都收成了 0x0 —— 它在明说：这一章的任务点没做完，不放行
+  [02:58:47]   停在这里，不硬绕（硬绕等于伪造进度）。卡住的这一章：17.2 精确制导技术
+  [02:58:47] 驱动器结束。
+
+八、注意
+--------------------------------------------------------------------------------
+  * 每章只认一次测验（quizStampedChapters）。学习通是单页应用、顶层文档不重载，
+    页面变量会跨章残留；没有这张总账的话，watchdog 刚拉起一个驱动器认过一次，
+    换一个进来就再也不认了。没填上的仍然会记进待办，不会因此被当成做完。
+  * 答题设置.json 现在是「记下题·问AI」：会截图读题、把答案填进页面、点「暂时保存」，
+    **不提交**。不想让它碰测验就把 mode 改成 0。
+  * 不要同时跑两个驱动器：实测两个一起跑会互相翻章、把页面搅成"章节来回跳"。
+
+================================================================================
