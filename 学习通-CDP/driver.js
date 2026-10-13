@@ -35,6 +35,13 @@
  *   node driver.js --run --next --force --speed=60
  *                                        伪心跳 60 倍速：不碰 playbackRate，
  *                                        替播放器把进度报上去（见 伪心跳.js）
+ * 【翻页收口（2026-10-13）：这一章还有"视频/文档类"任务点没完成 ⇒ 5 个内容型翻页出口都不许翻】
+ *   （"长时间零推进"那条强制推进**故意不拦** —— 它是最后的保险：播放代码出问题时
+ *     要有路可走，否则会永远卡住 ✓）
+ *   node driver.js --run --next --no-hold
+ *                                        整道收口闸门直接失效（回到旧行为：随时翻页）
+ *   或：新建一个空文件 _内部\收口关闭.txt  同上（不用改命令行；建了就生效、删了就恢复）
+ *   细节见下面 mediaHoldNeeded / holdForPendingMedia 的注释。
  * 环境变量：CDP_PORT(9222)   MUTE=0(不静音)
  */
 'use strict';
@@ -115,6 +122,152 @@ const hhmmss = (s) => {
   return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 };
 const log = (...a) => console.log('[' + ts() + '] ' + a.join(' '));
+
+/* 【门槛按类型分：这一章"剩下的全是测验/作业这类"吗？】（2026-10-13，法师要求）
+   依据 = PROBE 报回来的 taskStats.pendingNames（日志里"还没做的：文档"那个 ✓）。
+   true  = 剩下的全是**永远清不掉**的那类（我们只填草稿、不提交 ⇒ 平台永远标未完成 ✓）⇒ 可以不拦页 ✓
+   false = 要么夹杂视频/文档（**必须拦** ✓：2026-10-08 实测过"两张视频卡只播第一张就翻页 ⇒
+           第二张被留在身后" ✗），要么压根读不到类型（保守起见也拦 ✓）。
+   ★ 必须放在**文件顶层**：两个调用点分处不同作用域，写成局部变量/局部函数会踩"未定义" ✗
+     —— 我当天就在这儿把驱动器崩了 45 次（报错：onlyQuizLike is not defined）✗✗ */
+function onlyQuizLike(s) {
+  const QUIZLIKE = /测验|作业|考试|讨论/;
+  const names = (s && s.taskStats && s.taskStats.pendingNames) ? s.taskStats.pendingNames : [];
+  if (!names.length) return false;
+  return names.every((n) => QUIZLIKE.test(String(n)));
+}
+
+/* ============================================================================
+   【翻页收口：这一章还有"视频/文档类"任务点没完成 ⇒ 5 个"内容型"翻页出口都不许翻】
+   （2026-10-13。历史记录见 550 / 1681 / 3090 / 3689 / 3691 行附近）
+
+   为什么要收口：这一章"还有媒体任务点没做完"这个门槛以前只在主循环的一两条路上
+   生效，5 个内容型出口（伪心跳报满 / 文档读完 / 文档滚不动 / 没有可播内容 /
+   本节已完成）**全都不看它** ✗ ——
+   这正是 2026-10-08"同一页第二个视频被留在身后"能发生的通道。
+
+   ★ 【强制推进那条出口故意不拦】"长时间零推进"兜底（90 秒零进展 ⇒ 照旧强推）
+     保持原样、不受闸门影响 —— 它是最后的保险：万一播放代码/钩子出问题、
+     视频根本起不来，有收口就会永远卡住 ✗（2026-10-13 法师明确要求）。
+   平台事实：一张任务卡**不被点开，它的 <video> 根本不会进 DOM**
+   ⇒ 光看视频元素判断不了"全播完了"，只能看任务点欠账。
+
+   判据（mediaHoldNeeded）：
+     · pendingNames 里出现非测验/作业类（视频/文档/动图/音频/未知）⇒ 要拦 ✓
+     · pendingNames 读不出来，但 pending>0 或 catalogUnfinish>0 ⇒ 偏保守也拦 ✓
+     · onlyQuizLike(s)（剩下的全是测验/作业）⇒ 放行，绝不拦 ✓
+       （我们只填草稿、从不提交 ⇒ 平台永远标它们未完成 ⇒ 拦就是死锁 ✗）
+
+   动作（holdForPendingMedia）：拦下时打一行日志、计数 +1，并让调用处 continue
+   回主循环，交给现成的"点开任务点"逻辑去处理；同一章最多拦 HOLD_MAX_ROUNDS 轮，
+   到上限就照旧翻页，并**真的**记一次待办（说记了就必须真的落盘）。
+
+   ★ 两个一键关闸（回滚用）：
+       ① 命令行参数 --no-hold        ⇒ 整道闸门直接失效（等于旧行为）
+       ② 存在 _内部\收口关闭.txt      ⇒ 同上（每轮实时查；建了就生效、删了就恢复）
+
+   ★ 必须放**文件顶层**：5 个调用点分处不同作用域，写成局部函数会踩"未定义" ✗
+     （onlyQuizLike 那一课就在上面 119-125 行的注释里记着：崩过 45 次。）
+   ==========================================================================*/
+const HOLD_MAX_ROUNDS = 6;                        /* 同一章最多拦几轮 */
+const HOLD_OFF_ARG = process.argv.includes('--no-hold');
+const HOLD_OFF_FILE = path.join(__dirname, '_内部', '收口关闭.txt');
+const HOLD_QUIZLIKE_RE = /测验|作业|考试|讨论/;   /* 与 onlyQuizLike 里的判据保持同步 */
+/* 整道闸门是否被关掉（--no-hold 或 收口关闭.txt 任一成立） */
+function holdGateDisabled() {
+  if (HOLD_OFF_ARG) return true;
+  try { return fs.existsSync(HOLD_OFF_FILE); } catch (e) { return false; }
+}
+/* 【第二道尺子：平台标注的视频数 vs 页面视频卡完成数（2026-10-13 追加，法师要求）】
+   由来：PROBE 里早就有 s.step.videoCount（平台自己在"学习步骤"里标的"本节 N 个视频"，
+   931 行那段解析；此前只拿来打日志）。现在 PROBE 的任务点循环同时数出：
+     · step.videoCards —— 认得的视频卡数（iframe src 含 modules/video，或卡里有 <video>）
+     · step.videoDone  —— 其中带完成标记的个数（与任务点同一套 done 判据）
+   返回 '' = 这条不用拦；返回文案 = 要拦，文案就是日志里那行对账过程（数字全部来自页面）。
+   为什么需要它：两张视频卡只播第一张时，第二张的 <video> 根本没进 DOM、
+   任务点名也可能读不到它 —— 光靠 pendingNames 会漏判；平台标的数字不会漏 ✓。
+   不会死锁：视频是能做完的；万一数错，到 6 轮上限照旧放行 + 记待办 ✓。
+   数不准偏保守：一个视频卡都数不出来时，按"要拦"处理 ✓。 */
+function videoCountHoldLine(s) {
+  const step = (s && s.step) || {};
+  const vc = Number(step.videoCount) || 0;
+  if (vc <= 1) return '';                 /* 没标注 / 只有一个视频：这条尺子不启用 */
+  const cards = Number(step.videoCards) || 0;
+  const done = Number(step.videoDone) || 0;
+  if (cards === 0) return '本节标注 ' + vc + ' 个视频，但页面上一个视频卡都没数出来 ⇒ 先不翻页 ✓（数不准就偏保守）';
+  if (done < vc) return '本节标注 ' + vc + ' 个视频，已完成 ' + done + ' 个 ⇒ 先不翻页 ✓';
+  return '';
+}
+/* 这一章还有"视频/文档类"任务点没完成吗？true = 要拦。 */
+function mediaHoldNeeded(s) {
+  if (!s || !s.taskStats) return false;
+  /* 【第二道尺子优先于"全测验放行"】（2026-10-13 追加）
+     理由：任务点扫描可能漏掉"还没点开的第二张视频卡"，那一章 pendingNames 会只剩
+     "测验/作业" ⇒ onlyQuizLike 放行 ⇒ 恰好把"视频没播完"放过去了 ✗。
+     平台标的 videoCount 不会漏，所以先拿它对账；对不上就先拦 ✓（上限/开关照旧兜底）。*/
+  if (videoCountHoldLine(s)) return true;
+  if (onlyQuizLike(s)) return false;      /* 全是测验/作业 ⇒ 放行，绝不拦（否则死锁 ✗）*/
+  const names = Array.isArray(s.taskStats.pendingNames) ? s.taskStats.pendingNames : [];
+  /* 名字里出现任何非测验/作业类（视频/文档/动图/音频/未知）⇒ 拦 */
+  if (names.some((n) => !HOLD_QUIZLIKE_RE.test(String(n)))) return true;
+  if (names.length) return false;         /* 名字能读全、又全是测验/作业 —— 上面已兜过，这里只是防线 */
+  /* 名字读不出来：只要还有欠账（本页 pending 或目录未完成数）就偏保守地拦 */
+  const pending = Number(s.taskStats.pending) || 0;
+  const catalog = (typeof s.catalogUnfinish === 'number') ? s.catalogUnfinish : 0;
+  return pending > 0 || catalog > 0;
+}
+/* 每章已拦轮数。按章名存 key（照 taskTriedCount 那套写法）⇒ 换章 = 新 key，从 0 起 ✓ */
+const holdRounds = Object.create(null);
+const holdCapLogged = Object.create(null);   /* "到上限"那行日志每章只打一次 */
+/* 【轮次之间必须隔时间】（2026-10-13 真机发现）
+   原来只按"调用次数"计轮 —— 主循环跑一圈是**毫秒级** ✓
+   ⇒ 真机上六轮在**同一秒**里烧光（日志：第 1/6…6/6 轮全是 16:07:40）✗ ⇒ 等于没拦住。
+   现在规定：两次拦截之间**至少隔 HOLD_MIN_GAP_MS**，不够就先 sleep 到够
+   （sleep 同时避免空转烧 CPU ✓）。 */
+const HOLD_MIN_GAP_MS = 5000;                /* 两轮之间最少隔 5 秒
+                                                （法师定：20 秒太长 ✗；5 秒刚好够"点开卡 → 内容进 DOM"，
+                                                 驱动器自己点完任务点也只等 1.8 秒 ✓
+                                                 ⇒ 6 轮约 30 秒，既不空转也不干等 ✓） */
+const holdLastAt = Object.create(null);      /* 每章上一次拦截的时刻 */
+/* 闸门本体：true = 已拦下（调用处 continue 回主循环）；false = 放行（照旧翻页）。
+   why 只进日志，说清是哪个出口要翻页。
+   ★ async（2026-10-13）：轮次要隔 20 秒 ⇒ 里面要 await sleep ⇒ 调用处必须 await ✓ */
+async function holdForPendingMedia(s, why) {
+  if (holdGateDisabled()) return false;
+  if (!mediaHoldNeeded(s)) return false;
+  const ch = (s && s.chapter) || '';
+  const used = holdRounds[ch] || 0;
+  /* 【到上限：立刻放行，绝不在这一步 sleep】（顺序要紧：先判上限、再谈间隔 ✓）
+     否则到上限之后每一次出口调用都会白睡 20 秒 ✗ */
+  if (used >= HOLD_MAX_ROUNDS) {
+    /* 到上限：照旧翻页，但**真的**记一笔待办（日志说"记待办"就必须有落盘）*/
+    if (!holdCapLogged[ch]) {
+      holdCapLogged[ch] = true;
+      log('还有视频/文档类任务点没完成 ⇒ 本章已拦满 ' + HOLD_MAX_ROUNDS +
+          ' 轮，到上限，先翻页，记待办（' + why + '）');
+      const key = ch || '(读不到章节名)';
+      if (!todoChapters.has(key)) {
+        todoChapters.add(key);
+        recordTodo(key, '收口闸门：还有视频/文档类任务点没做完（已拦满 ' + HOLD_MAX_ROUNDS + ' 轮，按原样翻页）');
+        log('  ↳ 已写进 待办-未完成任务点.txt（收口闸门到上限）');
+      }
+    }
+    return false;
+  }
+  holdRounds[ch] = used + 1;
+  /* 【轮次间隔】距上次拦截不够 20 秒 ⇒ 先 sleep 到够
+     （不然主循环毫秒级转圈，六轮会在一秒内烧光 ✗ —— 真机 16:07:40 抓到过） */
+  const sinceLast = Date.now() - (holdLastAt[ch] || 0);
+  if (sinceLast < HOLD_MIN_GAP_MS) await sleep(HOLD_MIN_GAP_MS - sinceLast);
+  holdLastAt[ch] = Date.now();
+  log('还有视频/文档类任务点没完成 ⇒ 先不翻页，回去把它点开 ✓（第 ' + (used + 1) + '/' +
+      HOLD_MAX_ROUNDS + ' 轮，出口：' + why + '）');
+  /* 【对账过程也要看得见】（2026-10-13 追加）数字全部来自页面（PROBE 的 step.*），不是编的 */
+  const tick = videoCountHoldLine(s);
+  if (tick) log('　↳ 对账：' + tick);
+  return true;
+}
+/* ---- 收口闸门 END（离线真值表脚本从 function onlyQuizLike 抠到这里）---- */
 
 /* ---------------- 只在运行期间阻止睡眠 ----------------
    用 Windows 的 SetThreadExecutionState，交给 保持唤醒.ps1 去持这个请求：
@@ -991,6 +1144,13 @@ const PROBE = `(function(){
     if (R.v) {
       try { videoCard = R.v.closest('.ans-attach-ct'); } catch (e) { videoCard = null; }
     }
+    /* 【视频卡对账计数（2026-10-13 追加）】平台自己在"学习步骤"里标了本节几个视频
+       （o.step.videoCount，前面 931 行那段解析）。这里把页面上的视频卡数出来：
+         · 认卡：卡片里的 iframe src 含 modules/video，或卡里直接有 <video> 元素；
+         · 认完成：用同一套 done 判据（FIN 正则 + .ans-job-icon 的 aria-label）。
+       数不准没关系：driver 那边对不上账就偏保守地拦（上限与开关兜底）✓。
+       这段在模板字符串里 —— 不用正则、不用反引号，全部走 indexOf。 */
+    var vCards = 0, vDone = 0;
     for (var pi = 0; pi < pts.length; pi++) {
       var pt = pts[pi];
       var icon = pt.querySelector('.ans-job-icon');
@@ -999,6 +1159,15 @@ const PROBE = `(function(){
       o.taskStats.total++;
       if (done) o.taskStats.done++; else o.taskStats.pending++;
       if (pt === videoCard) o.taskStats.videoCardDone = done;
+      /* 视频卡对账：认卡 + 记完成（数法见上面那段注释，刻意保守）*/
+      try {
+        var frv = pt.querySelector('iframe');
+        var srcv = String((frv && frv.getAttribute('src')) || '');
+        if (srcv.indexOf('modules/video') >= 0 || pt.querySelector('video')) {
+          vCards++;
+          if (done) vDone++;
+        }
+      } catch (e) {}
       if (!done && o.taskStats.pendingNames.length < 4) {
         var fr = pt.querySelector('iframe');
         var src = String((fr && fr.getAttribute('src')) || '');
@@ -1014,6 +1183,9 @@ const PROBE = `(function(){
         o.taskStats.pendingNames.push(kind);
       }
     }
+    /* 视频卡对账结果（供 driver 侧"平台标注 N 个视频 vs 已完成几个"使用）*/
+    o.step.videoCards = vCards;
+    o.step.videoDone = vDone;
     /* 兼容字段：整章是否全绿（只有全绿才叫"这一章做完了"） */
     o.platformDone = (o.taskStats.total === 0) ? false : (o.taskStats.pending === 0);
   }
@@ -2186,6 +2358,83 @@ const DOC_STEP = `(function(){
     await c.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
   }
 
+  /* 【点之前先看清"那个坐标上现在到底是什么"】2026-10-13 实测（微分的几何动图）：
+     日志里"命中检查通过"和"坐标上命中的是 <IMG>"同时出现，两句话不矛盾 ——
+     检查通过之后到真点下去之间隔了 ~300ms（mouseMoved + sleep180 + press），
+     而文档阅读器/动图那种页面**自己会滚动重排** ⇒ 那一下正好戳在图片上 ✗
+     ⇒ 平台弹出全屏查看器 ⇒ 整页被盖住、「下一节」再也测不到命中 ⇒ 死循环。
+     所以：真点之前再问一次 elementFromPoint；命中的是图片/图片链接/查看器类 ⇒ 这一下不点。 */
+  async function topIsSafe(x, y) {
+    try {
+      /* ★ 必须**直接返回对象**：ev() 返回的是 CDP 的 returnByValue 值本身；
+         JSON.stringify 出来的字符串在这里等于"什么都没有"（2026-10-13 栽过一次 ✗）。 */
+      const r = await ev('(function(){var e=null;try{e=document.elementFromPoint(' + x + ',' + y + ');}catch(err){}' +
+        'if(!e||!e.tagName)return {ok:false,tag:"(测不到)",cls:""};' +
+        'var a=e,t2=e;for(var i=0;i<3&&t2;i++){if(t2.tagName==="A"){a=t2;break;}t2=t2.parentElement;}' +
+        'var cls=String(e.className||"");' +
+        'var imgLink=(e.tagName==="A")?!!e.querySelector("img"):((a&&a.tagName==="A")?!!a.querySelector("img"):false);' +
+        'var bad=(e.tagName==="IMG")||imgLink||/viewer|mask|layer|popup/i.test(cls);' +
+        'return {ok:!bad,tag:e.tagName,cls:cls.slice(0,40)};})()');
+      if (!r || typeof r !== 'object') return { ok: true, tag: '(没读到)', cls: '' };
+      return r;
+    } catch (e) { return { ok: true, tag: '(查询失败)', cls: '' }; }
+  }
+
+  /* 【卡住时清浮层】只读判断 ⇒ **确认有全屏浮层**才动手。顺序按实测来：
+     ① 点浮层自带的按钮（超星那个图片查看器是 DIV.viewer-button —— **ESC 对它没用** ✗，实测过）
+     ② 发一次真 ESC（有些浮层吃这个 ✓）
+     ③ history.back()（退回学习页 ✓）
+     每步之后重新检测；两轮都不行就返回 false（调用方照旧等/停 ✓）。 */
+  async function clearViewerOverlay(why) {
+    /* ★ 同上：这几个探针**必须直接返回对象/数组**，不能 JSON.stringify ✗
+       （evalOnce 给的是 CDP 的 returnByValue 值本身 ✓） */
+    const DETECT = '(function(){' +
+      'function big(doc){var els=null;try{els=doc.querySelectorAll("img,[class*=viewer],[class*=mask],[class*=layer],[class*=popup]");}catch(e){els=null;}' +
+      'if(els)for(var i=0;i<els.length;i++){var el=els[i],r=el.getBoundingClientRect(),cs=getComputedStyle(el);' +
+      'if(r.width*r.height<window.innerWidth*window.innerHeight*0.25)continue;' +
+      'if(cs.display==="none"||cs.visibility==="hidden")continue;' +
+      'return el.tagName+(el.className?("."+String(el.className).split(" ").slice(0,2).join(".")):"");}return "";}' +
+      'return {overlay:big(document),bodyCls:String((document.body&&document.body.className)||"")};})()';
+    let cleared = false;
+    for (let round = 0; round < 2; round++) {
+      const st = await ev(DETECT);
+      if (!st || !st.overlay) { if (round && cleared) log('  ✓ 浮层没了。'); return round ? true : false; }
+      log('发现全屏浮层（' + st.overlay + (st.bodyCls ? ('，body."' + String(st.bodyCls).slice(0, 30) + '"') : '') + '）—— ' + why + '，先清掉它。');
+      /* ① 点自带按钮 */
+      const btns = await ev('(function(){var c=null;try{c=document.querySelectorAll("[class*=viewer-button],[class*=close],[class*=Close],[title*=关闭]");}catch(e){c=null;}' +
+        'var out=[];if(c)for(var i=0;i<c.length&&out.length<4;i++){var el=c[i],r=el.getBoundingClientRect(),cs=getComputedStyle(el);' +
+        'if(r.width<8||r.height<8||cs.display==="none"||cs.visibility==="hidden")continue;' +
+        'out.push({x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2),d:el.tagName+"."+String(el.className||"").split(" ")[0]});}return out;})()');
+      if (Array.isArray(btns)) {
+        for (const b of btns) {
+          log('  清浮层：点 ' + b.d + ' @(' + b.x + ',' + b.y + ')');
+          await clickTop(b.x, b.y);
+          await sleep(1200);
+          const st2 = await ev(DETECT);
+          if (st2 && !st2.overlay) { log('  ✓ 浮层清掉了（点 ' + b.d + ' 生效）。'); return true; }
+        }
+      }
+      /* ② ESC */
+      log('  清浮层：发一次 ESC');
+      try {
+        await c.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+        await c.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+      } catch (e) {}
+      await sleep(1000);
+      const st3 = await ev(DETECT);
+      if (st3 && !st3.overlay) { log('  ✓ ESC 把浮层关了。'); return true; }
+      /* ③ 退一步 */
+      log('  清浮层：history.back()');
+      try { await ev('(function(){try{history.back();}catch(e){}return JSON.stringify({ok:1});})()'); } catch (e) {}
+      await sleep(3000);
+      cleared = true;
+    }
+    const stf = await ev(DETECT);
+    if (stf && !stf.overlay) { log('  ✓ 浮层没了。'); return true; }
+    log('  ✗ 浮层还在，这一轮清不掉（下一轮再试）。');
+    return false;
+  }
+
   /* 试着打开当前章节的「章节测验」并交给答题助手。每章只试一次。
      返回 'stop' 表示按设置要退出。
      原来这段只写在 handlePopup 的"跳过分支"里 —— 结果是：只有弹窗拦路时才会去找测验。
@@ -2699,6 +2948,12 @@ const DOC_STEP = `(function(){
      既费时间又更容易撞平台的重复提交检测。声明挪到调用点之前即可。 */
   const taskTriedCount = Object.create(null);
   const taskCapLogged = Object.create(null);
+  /* 【点开会弹全屏查看器的任务点 —— 按**后果**记住，不按名字猜】
+     2026-10-13（微分的几何动图）：点开那个任务点 ⇒ 平台弹图片查看器 ⇒ 整页被盖住 ⇒ 死循环 36 分钟。
+     但**不能因此整章不点** ✗ —— 同一章里完全可能有视频/测验等别的任务点 ✓。
+     所以：点完发现弹了查看器 ⇒ 只把**这一个任务点**（按它的显示文字认）记下来，
+     下次跳过它一个，本章其它任务点照常点 ✓。浮层的清理交给 clearViewerOverlay ✓。 */
+  const viewerProneTasks = Object.create(null);   /* { 章节名: { 任务点文字: true } } */
   const handledSpin = Object.create(null);
   /* quizStampedChapters 原本就声明在上面（2548 行附近），这里不再重复声明 */
 
@@ -2879,17 +3134,40 @@ const DOC_STEP = `(function(){
       if (advanceFails <= 2 || advanceFails % 10 === 0) {
         log('找不到「下一节」按钮（第 ' + advanceFails + ' 次）：' + (nb && nb.why ? nb.why : '拿不到按钮信息'));
       }
-      if (advanceFails >= 3) {
-        if (advanceFails % 5 === 0) log('  连着 ' + advanceFails + ' 次找不到「下一节」，不退出了，隔一会再找。');
-        await sleep(8000);
-        if (advanceFails >= 40) {
-          log('连续 40 次找不到「下一节」—— 要么这一章真到头了，要么页面出问题了，停下。');
-          advanceDead = true;
+      /* 【先清浮层，再取一次按钮】2026-10-13 实测（微分的几何动图）：
+         平台的图片查看器把整页盖住 ⇒「下一节」明明还在（82x36）却测不到命中 ✗
+         ⇒ 老逻辑只会"等 40 次然后停" ✗。这里先清一层浮层；清掉就继续走正常流程 ✓ */
+      if (await clearViewerOverlay('找不到「下一节」')) {
+        const nb2 = await ev(SCROLL_NEXT);
+        if (nb2 && !nb2.none && !nb2.disabled) {
+          log('  清完浮层，「下一节」回来了：@(' + nb2.x + ',' + nb2.y + ')  ' + nb2.w + 'x' + nb2.h);
+          nb = nb2;
         }
       }
-      return false;
+      if (!nb || nb.none) {
+        if (advanceFails >= 3) {
+          if (advanceFails % 5 === 0) log('  连着 ' + advanceFails + ' 次找不到「下一节」，不退出了，隔一会再找。');
+          await sleep(8000);
+          if (advanceFails >= 40) {
+            log('连续 40 次找不到「下一节」—— 要么这一章真到头了，要么页面出问题了，停下。');
+            advanceDead = true;
+          }
+        }
+        return false;
+      }
     }
     if (nb.disabled) { log('「下一节」按钮是禁用状态（' + (nb.cls || '') + '），停下。'); advanceDead = true; return false; }
+
+    /* 【点之前复检：那个坐标上现在是按钮吗】防止"检查通过 ⇒ 页面自己重排 ⇒ 点到图片"✗ */
+    const safe = await topIsSafe(nb.x, nb.y);
+    if (!safe || !safe.ok) {
+      log('  那个坐标上现在不是按钮（命中 ' + ((safe && safe.tag) || '?') + (safe && safe.cls ? ('.' + safe.cls) : '') +
+        '）—— 这一下**不点**，免得点开图片/查看器 ✗');
+      await clearViewerOverlay('点击前复检发现坐标底下不是按钮');
+      advanceFails++;
+      await sleep(3000);
+      return false;
+    }
 
     log(reason + ' 点「下一节」@(' + nb.x + ',' + nb.y + ')  ' + nb.w + 'x' + nb.h + '  视口 ' + nb.vp.join('x') + '  命中检查通过');
     await clickTop(nb.x, nb.y);
@@ -2969,7 +3247,10 @@ const DOC_STEP = `(function(){
   let readyWaitSince = 0;    /* "等页面就绪"从什么时候开始等的（死线用） */
   let rebinds = 0;           /* 重连次数（防止无限重连） */
   let pendingWaitLogged = false; /* "有任务点但卡片没加载完，先等"的提示只打一次 */
-  let pendingWaitSince = 0;      /* 这个等待从什么时候开始的（40 秒封顶） */
+  let pendingWaitSince = 0;      /* 这个等待从什么时候开始的（原来 40 秒封顶，2026-10-13 降到 12 秒） */
+  /* 【利索一点】同一章只允许"先不翻页地等"一次：等过就直接交给答题助手，不再回来干等 ✓
+     （否则 tryQuiz 之后 pendingWaitSince 被清零 ⇒ 反复回来等 ⇒ 一章要 60~90 秒 ✗） */
+  const pendingWaitedChapters = new Set();
   /* 【这几个计数器已在上面（restoreCheckpoint 调用点之前）声明，别在这里重复声明】
      原因见那段注释：它们是 const/let，声明晚于使用点就是 TDZ 错误。 */
   /* 【每章点开过几次任务点（2026-10-08 多视频）】
@@ -3033,6 +3314,9 @@ const DOC_STEP = `(function(){
         log('  强制往下走一次：该翻页就翻页。');
         lastProgressAt = Date.now();
         lastProgressWhat = '强制推进';
+        /* 【这里**故意没有**收口闸门】（2026-10-13，法师明确要求）
+           强制推进是最后的保险：万一播放代码/钩子出问题、视频根本起不来，
+           有闸门就会一直拦着 ⇒ 永远卡住 ✗。所以这条出口保持原样：90 秒零推进就强推 ✓ */
         if (NEXT) { await advance('长时间零推进。'); if (advanceDead) break; }
         else await sleep(2000);
         continue;
@@ -3126,6 +3410,9 @@ const DOC_STEP = `(function(){
          以前这个计时器跨章保留，上一章把 40 秒用光后，
          这一章一进来就直接判'等够了'、立刻翻页（实测：函数的求导法则 就这么又跳过去了）。 */
       pendingWaitSince = 0; pendingWaitLogged = false;
+      /* 收口闸门：这一章是"新进"的，拦页轮数从 0 起
+         （holdRounds 本来就按章名各算各的；这行只是显式清掉"同一章名兜回来"的残留 ✓）*/
+      holdRounds[s.chapter] = 0;
       /* 换章时重读一次答题助手的配置，这样跑着的时候改设置也能生效。
          重读之后必须把"记账"字段补回去 —— 否则新对象上没有 onUnanswered，
          换过章之后的题就不会记进"没做的题"清单了。 */
@@ -3270,6 +3557,8 @@ const DOC_STEP = `(function(){
            这里给 15 秒死线，到点直接按本节完成处理 —— 不然就是无声空转。 */
         if (Date.now() - hbDoneAt > 15000) {
           log('伪心跳报满后 15 秒仍未进入「播放完成」分支，直接按本节完成处理。');
+          /* 【收口闸门 1/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
+          if (NEXT && await holdForPendingMedia(s, '伪心跳报满兜底')) continue;
           if (NEXT) { await advance('伪心跳已把进度报到片尾。'); if (advanceDead) break; }
           else await sleep(2000);
           continue;
@@ -3285,6 +3574,8 @@ const DOC_STEP = `(function(){
       if (doc && doc.type !== 'none') {
         if (doc.ended) {
           if (!announcedDone) { announcedDone = true; log('✅ 文档阅读到底了：' + doc.pct + '%   （' + doc.type + '）'); }
+          /* 【收口闸门 2/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
+          if (NEXT && await holdForPendingMedia(s, '文档读完')) continue;
           if (NEXT) { await advance('文档读完了。'); if (advanceDead) break; }
           else await sleep(2000);
           continue;
@@ -3292,6 +3583,8 @@ const DOC_STEP = `(function(){
         if (doc.pct === docLastPct) { docStuck++; } else { docStuck = 0; docLastPct = doc.pct; markProgress('滚文档 ' + doc.pct + '%'); }
         if (docStuck >= 6) {
           log('⚠ 文档滚不动了（卡在 ' + doc.pct + '%，' + doc.type + '），不再干滚，先看这一章还有什么。');
+          /* 【收口闸门 3/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
+          if (NEXT && await holdForPendingMedia(s, '文档滚不动')) continue;
           if (NEXT) { await advance('文档滚不动了。'); if (advanceDead) break; }
           else await sleep(3000);
           continue;
@@ -3334,11 +3627,29 @@ const DOC_STEP = `(function(){
          闸门就会漏过去（实测"函数的求导法则"就这么又跳过一次）。
          章节列表那个数字一直在线，所以两个信号取大的那个，谁大信谁。 */
       const catalogLeft = (typeof s.catalogUnfinish === 'number') ? s.catalogUnfinish : 0;
-      const leftWork = Math.max(pendingTasks, catalogLeft);
+      /* 【门槛按类型分（2026-10-13，法师要求）】
+         现实：**测验/作业**这类任务点，我们只填草稿、从不提交 ⇒ 平台上**永远不会清零** ✗
+               ⇒ 它一直卡在"还有任务点没做完"上，白等（正是"视频早播完了还被题目牵连着"的由来 ✓）。
+         但**视频/文档/动图**那类是能做完的 ✓ —— 它们的门槛必须留着 ✓：
+              2026-10-08 实测过"一章两张视频卡，只播第一张就翻页 ⇒ 第二张被留在身后" ✗
+              （多视频那个保险现在就靠这道门槛撑着 ✓ 见那天的修法）。
+         ⇒ 所以：**只有确实知道"剩下的全是测验/作业这类"时才放行** ✓；
+            类型读不出来（或夹杂视频/文档）⇒ 照旧拦 ✓（宁可多等，不许漏内容 ✓）。
+         ★ 用函数而不是变量：这两个判据(3450/3690 附近)在**不同作用域**里各用一次，
+           当天我就因为写成变量、有一处跨了作用域，把驱动器崩了 39 次 ✗
+           （报错：onlyQuizLikeLeft is not defined）。自包含的函数没有这个坑 ✓ */
+      const leftWork = onlyQuizLike(s) ? 0 : Math.max(pendingTasks, catalogLeft);
       /* 本章这次的题已经交给答题助手做过一遍了（quizStampedChapters 里记着）——
          那就不再重复等待：草稿已存，任务点在平台上仍是"未完成"，
          再等下去只是空耗（实测填完后又白等了 40 秒）。 */
-      const quizAlreadyHandled = quizStampedChapters.has(s.chapter || lastChapter);
+      /* 【2026-10-13 补：**只填过草稿的章**也要算"做过了"】
+         实测（泰勒公式）：它的题在 quizFilledKeys 里（本轮填过草稿），但不在
+         quizStampedChapters 里 ⇒ 这道闸门没挡住 ⇒ 白白干等 13 秒才翻页 ✗。
+         而"草稿不提交"是设计底线 ⇒ 这种章的任务点在平台上**永远不会清零** ✗
+         ⇒ "回头再探一次看任务点清没清"这个期待对它们恒不成立 ⇒ 等就是纯浪费 ✓。
+         （下面 3666 那道闸门 10-07 就已经是双集合了，这里当时漏了。） */
+      const quizAlreadyHandled = quizStampedChapters.has(s.chapter || lastChapter) ||
+                                 quizFilledKeys.has(s.chapter || lastChapter);
       if (leftWork > 0 && !quizAlreadyHandled) {
         /* 【先主动把任务点点开一次 —— 旧版能跑、这版卡住的关键差别就在这】
            旧版 activateTaskPoint 的注释（照 nuaa 那份 pyc 里挖出来的日志）：
@@ -3358,12 +3669,25 @@ const DOC_STEP = `(function(){
           chkSave(chNow, { quizFound: 0 });
           const act = await ev(ACTIVATE_TASK);
           if (act && act.ok && typeof act.x === 'number') {
-            log('👆 点开任务点（' + act.tag + '）：' + act.label +
-                '   未完成 ' + act.pending + '/' + act.total + ' 个' + (act.inView ? '' : '（在视口外，仍按坐标点一次）') +
-                (triedN > 0 ? ('   本章第 ' + (triedN + 1) + ' 次点开') : ''));
-            try { await clickTop(act.x, act.y); } catch (e) {}
-            await sleep(1800);
-            continue;   /* 让内容加载出来，下一轮 PROBE 重新判 */
+            const proneKey = String(act.label || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+            const prone = (viewerProneTasks[chNow] = viewerProneTasks[chNow] || Object.create(null));
+            if (proneKey && prone[proneKey]) {
+              /* 这一个任务点上次点开弹了全屏查看器 ⇒ 跳过它一个；本章别的任务点照常 ✓ */
+              log('· 这个任务点上次点开会弹全屏查看器，跳过它一个：' + proneKey.slice(0, 30) +
+                  '　（本章其它任务点照常处理 ✓）');
+            } else {
+              log('👆 点开任务点（' + act.tag + '）：' + act.label +
+                  '   未完成 ' + act.pending + '/' + act.total + ' 个' + (act.inView ? '' : '（在视口外，仍按坐标点一次）') +
+                  (triedN > 0 ? ('   本章第 ' + (triedN + 1) + ' 次点开') : ''));
+              try { await clickTop(act.x, act.y); } catch (e) {}
+              await sleep(1800);
+              /* 【点完看后果】弹了全屏浮层（图片查看器那种）⇒ 清掉 + 只拉黑这一个任务点 ✓ */
+              if (await clearViewerOverlay('点开任务点之后')) {
+                if (proneKey) prone[proneKey] = true;
+                log('  ↳ 这个任务点会弹全屏查看器：已经清掉了，并记住它，下次不再点它一个 ✓（本章其它任务点不受影响）');
+              }
+              continue;   /* 让内容加载出来，下一轮 PROBE 重新判 */
+            }
           } else {
             log('· 这一章没能点开任务点：' + ((act && act.why) || '未返回结果'));
           }
@@ -3373,8 +3697,15 @@ const DOC_STEP = `(function(){
         }
         /* 这一章还有没做完的任务点：先别翻页 */
         if (!pendingWaitSince) pendingWaitSince = Date.now();
+        /* 【利索一点（2026-10-13，法师要求"利索点"）】
+           原来这里等 40 秒，而 tryQuiz 之后又把 pendingWaitSince 清零 ⇒
+           **同一章可以反复回来再等 40 秒** ⇒ 实测一章要 60~90 秒才翻过去 ✗。
+           现在：① 等待 40 秒 → **12 秒**（卡片渲染够用了 ✓）
+                 ② 同一章**最多只等一次**：等过就直接交给答题助手，不再回来干等 ✓
+           题目晚出来不要紧：tryQuiz 自己会重试 6 次（每次等 3 秒）等题目出现 ✓。 */
+        const waitedThisChapter = pendingWaitedChapters.has(chNow);
         const waitedP = Date.now() - pendingWaitSince;
-        if (waitedP < 40000) {
+        if (!waitedThisChapter && waitedP < 12000) {
           if (!pendingWaitLogged) {
             pendingWaitLogged = true;
             const names = (s.taskStats && s.taskStats.pendingNames && s.taskStats.pendingNames.length)
@@ -3385,6 +3716,7 @@ const DOC_STEP = `(function(){
           await sleep(2500);
           continue;
         }
+        pendingWaitedChapters.add(chNow);
         /* 等够了：交给答题助手去做这些任务点（它认得卡片页里的 work 卡） */
         if (pendingWaitLogged) {
           pendingWaitLogged = false;
@@ -3435,6 +3767,8 @@ const DOC_STEP = `(function(){
         lastReport = Date.now();
         log('这一章没有可播的内容。' + (s.platformDone ? '平台已标记完成。' : ''));
       }
+      /* 【收口闸门 4/5】还有视频/文档类任务点没完成 ⇒ 先不翻页（同一章最多 6 轮）*/
+      if (NEXT && await holdForPendingMedia(s, '没有可播内容')) continue;
       if (NEXT) { await advance('本节没有可播的内容。'); if (advanceDead) break; }
       else await sleep(2000);
       continue;
@@ -3524,7 +3858,7 @@ const DOC_STEP = `(function(){
          紧接着就 advance 走人，那张 work 卡（题目）一次都没被碰。
          现在这里加一道：还剩活没干、且答题助手这一轮没做成 → 先等一会再来一轮，
          等到上限还不行才翻页（并照旧记待办）。 */
-      const leftWork2 = Math.max((s.taskStats && s.taskStats.pending) || 0,
+      const leftWork2 = onlyQuizLike(s) ? 0 : Math.max((s.taskStats && s.taskStats.pending) || 0,
                                 (typeof s.catalogUnfinish === 'number') ? s.catalogUnfinish : 0);
       /* 【题本轮已经填过草稿的章，不要再等（2026-10-07 实测）】
          草稿是"不提交"的（这是设计底线），所以平台那一章的任务点永远不会变成已完成 ——
@@ -3577,6 +3911,8 @@ const DOC_STEP = `(function(){
       pendingWaitSince = 0;
       /* 同一章可能还有文档任务，接着把文档滚完（跟"测验填完了"那条路共用同一段） */
       if (await scrollDocThenContinue()) continue;
+      /* 【收口闸门 5/5】还有视频/文档类任务点没完成 ⇒ 先不翻页（同一章最多 6 轮）*/
+      if (NEXT && await holdForPendingMedia(s, '本节已完成')) continue;
       if (NEXT) { await advance('本节已完成。'); if (advanceDead) break; continue; }
       await sleep(2000);
       continue;

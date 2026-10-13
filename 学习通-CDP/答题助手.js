@@ -2628,12 +2628,13 @@ function makeHelper(cfg, deps) {
       const useAI = (cfg.useAI !== false);
 
       /* 【AI 模式关着的时候不要走截图路】截图那条路存在的唯一目的就是"给模型看图"，
-         关了 AI 还去拍图，等于白拍 + 白等。 */
-      if (!useAI && pipeline === 'shot') {
-        pipeline = 'dom';      /* 退回按 DOM 文本读（能读就读、读不出就记下来，一律不问模型） */
-        lines.push('');
-        lines.push('  （AI 模式关着 → 不走截图路；能读到的题按题库答，读不到的留着不填）');
-      }
+         关了 AI 还去拍图，等于白拍 + 白等。
+         ★ 2026-10-13 修（既有崩溃 bug，子代理发现、我复核过 ✓）：
+           这段原来就写在这里，可 `pipeline` 要到下面（约 2911 行）才声明 ——
+           于是 **只要把"AI 模式"关掉**，这一行立刻 `ReferenceError: Cannot access
+           'pipeline' before initialization`，整章直接做不了 ✗。
+           现在把"改 pipeline"那半句挪到**判定之后**（见下面 2925 附近）✓；
+           这里只留这句注释，避免重复打印。 */
       if (!useAI && cfg.mode >= 2) {
         lines.push('  （AI 模式关着：只按本地题库答，库里没有的题**留着不填**，一分钱不花）');
       }
@@ -2920,6 +2921,13 @@ function makeHelper(cfg, deps) {
           if (tableOk) { pipeline = 'dom'; why = '解码表有效'; }
           else { pipeline = 'shot'; why = haveTable ? '页面字体与解码表不符' : '本地没有解码表'; }
         }
+      }
+      /* 【AI 模式关着的时候不要走截图路】（2026-10-13 从上面搬下来 —— 见那段注释）：
+         截图那条路存在的唯一目的就是"给模型看图"，关了 AI 还去拍图，等于白拍 + 白等。 */
+      if (!useAI && pipeline === 'shot') {
+        pipeline = 'dom';      /* 退回按 DOM 文本读（能读就读、读不出就记下来，一律不问模型） */
+        lines.push('');
+        lines.push('  （AI 模式关着 → 不走截图路；能读到的题按题库答，读不到的留着不填）');
       }
 
       /* 写记录文件。两条路都要写，所以提出来 */
@@ -3403,6 +3411,17 @@ function makeHelper(cfg, deps) {
       }
 
       /* ---------------- 路 B：直接读网页里的文字 ---------------- */
+      /* 【看图补漏要用的三样】
+         · visionRetryReady() —— 这一章还允不允许再走一次截图路：AI 关着不走（截图这条路
+           存在的唯一目的就是给模型看图，见上面那条规矩）；驱动没注入截图函数不走；
+           这一页已经交过（graded）不走；解码表有效（pipeline='dom'）才走 ——
+           readMode=table 且表废时 pipeline='none'，那是用户明确选了"只认解码表"，不打扰。
+         · hasImgs(q) —— 题干带图（公式/图表可能只画在图里）。
+         · visionMissed —— 攒着"带图、模型答不出"的题，循环跑完统一补漏，每章最多一次。 */
+      const visionRetryReady = () => (cfg.mode >= 2 && useAI && !r.graded && pipeline === 'dom' &&
+        !!(deps && deps.shot));
+      const hasImgs = (q) => !!((q.imgs && q.imgs.length) || (q.imgIds && q.imgIds.length));
+      const visionMissed = [];
       let n = 0;
       for (const q of r.questions) {
         if (n >= cfg.maxPerChapter) {
@@ -3550,7 +3569,14 @@ function makeHelper(cfg, deps) {
               noteMiss(q, '没开自动填（autoFill=false）');
             } else {
               /* p.answer === null：模型答不出来 */
-              noteMiss(q, '模型无法确定答案');
+              /* 【先别急着记欠账】公式题的文字是空壳（"函数在上满足拉格朗日中值定理的假设"），
+                 公式活在图里 —— 只送文字时模型必然答不上来。这一章走完表格路之后还有一次
+                 "截图看图"的机会（见下面那段"看图补漏"）：带图的题先登记，真补不上才记欠账。 */
+              if (visionRetryReady() && hasImgs(q)) {
+                visionMissed.push({ q: q, qi: r.questions.indexOf(q) });
+              } else {
+                noteMiss(q, '模型无法确定答案');
+              }
             }
           } catch (e) {
             lines.push('      → 问 AI 失败：' + e.message);
@@ -3559,6 +3585,86 @@ function makeHelper(cfg, deps) {
         } else {
           noteMiss(q, '答题助手模式是「' + (cfg.mode === 0 ? '不做题' : '记下题·不问AI') + '」，没答题');
         }
+      }
+
+      /* ---------------- 看图补漏：表格路答不出的图片题，再走一次截图 ----------------
+         【为什么要有这一段】有些题的公式/图表只活在**图片**里，题干是一句空壳、
+         选项也是空的（实测 2026-10-13「微分中值定理」：15 道题里 8 道是这种图片题，
+         记录里有题、没答案）。只把文字送去问模型，它必然回"题干缺少具体函数和区间，
+         无法判断" —— 那几道全被记成了欠账。
+         可解码表有效时这一章走的是 DOM 路，**压根不截图**（见文件上面那条注释：
+         "解码表还有效时根本不走这条路"），所以看图永远轮不到它们。
+         这里补一次：只对"带图、模型答不出"的那几道题跑一遍现成的截图路
+         （grabShots 的 only 机制 + transcribeShots + 问答案 + fillFromText 的 indexMap，
+         跟"题库只命中一部分"那条路完全同一套），**每章最多一次**，拿不到就不反复试；
+         只填、不交（跟其它路一样，全文件没有一处点提交）。 */
+      if (visionMissed.length) {
+        const onlyIdx = visionMissed.map((x) => x.qi);      /* 页面题目序号（0 起），只拍这几道 */
+        const vN = onlyIdx.length;
+        lines.push('');
+        lines.push('  ↳ 有 ' + vN + ' 道题是图片题（题干/选项是空壳，模型答不出）⇒ 走截图看图再读一遍：');
+        const vDiag = { note: [], captureErrors: [] };
+        let vShots = [];
+        try { vShots = await grabShots(evFn, shot, cfg.maxShots || 3, vDiag, { only: onlyIdx }); }
+        catch (e) { vShots = []; vDiag.captureErrors.push('截图整体抛错：' + ((e && e.message) || e)); }
+        for (const nl of (vDiag.note || [])) lines.push('     ' + nl);
+        let vMsg = '', vWhy = '';
+        if (!vShots.length) {
+          vWhy = '一张都没截到（浏览器窗口被盖住 / 标签页在后台？）' +
+            ((vDiag.captureErrors || []).length ? '；截图失败明细：' + vDiag.captureErrors.slice(0, 2).join('；') : '');
+        } else {
+          lines.push('     → 截了 ' + vShots.length + ' 张，交给 ' + (cfg.visionModel || 'deepseek-flash') + ' 抄录…');
+          try {
+            const vt = await transcribeShots(cfg, vShots);
+            QS.addUsage(usage, vt && vt.usage);
+            /* 抄录里一道题都没有 → 大概率拍到了别的卡：不填（判据跟截图路一致） */
+            if (!/【(单选|多选|判断)题】|\n\s*\d{1,2}\s*[.、)）]/.test(String((vt && vt.text) || ''))) {
+              vWhy = '抄录里一道题都没有（很可能拍到了别的卡）';
+            } else if (vDiag.smallViewport && vDiag.triedExpand && vDiag.expanded === false) {
+              vWhy = '视口没能撑回来，题面可能没拍全 —— 按"不可信"处理，不填';
+            } else {
+              lines.push('     ──── 看图抄录（原样，未经加工）────');
+              for (const L of String(vt.text).split(/\r?\n/)) lines.push('     ' + L);
+              lines.push('     ──────────────────────────────────');
+              let va = await askRaw(ANSWER_FROM_TEXT + '\n\n' + vt.text, cfg);
+              QS.addUsage(usage, va && va.usage);
+              if (va && va.empty) {
+                lines.push('     → 第一次问没拿到正文（思考把额度吃光了），原样重问一次…');
+                await new Promise((r2) => setTimeout(r2, 1200));
+                va = await askRaw(ANSWER_FROM_TEXT + '\n\n' + vt.text, cfg);
+                QS.addUsage(usage, va && va.usage);
+              }
+              lines.push('     ──── 看图答案（模型生成，没有验证过）────');
+              for (const L of String(va.text).split(/\r?\n/)) lines.push('     ' + L);
+              lines.push('     ──────────────────────────────────');
+              try {
+                vMsg = await fillFromText(evFn, va.text, vN, {
+                  indexMap: onlyIdx, reopenQuiz: reopenQuiz, clickAt: clickAt
+                });
+              } catch (e) { vMsg = '填充出错：' + ((e && e.message) || e); }
+              lines.push('     → ' + vMsg);
+            }
+          } catch (e) {
+            vWhy = '看图失败：' + ((e && e.message) || e);
+          }
+        }
+        /* 【逐道核对，账目口径跟其它路一致】
+           补上的记"填了"（noteFilled），没补上的照旧记欠账（noteMiss）——
+           不能因为"补漏跑过了"就说题补上了，也不能让没补上的题从欠账里消失。 */
+        const vDone = new Set();
+        const vMatch = String(vMsg).match(/已按顺序填进页面：([\s\S]*)$/);
+        if (vMatch) for (const piece of vMatch[1].split('；')[0].split('，')) {
+          const mn = piece.match(/第(\d+)题/);
+          if (mn) vDone.add(Number(mn[1]));
+        }
+        let vBack = 0;
+        for (const x of visionMissed) {
+          if (vDone.has(x.qi + 1)) { noteFilled(); vBack++; }
+          else noteMiss(x.q, '模型无法确定答案（随后走截图看图，也没补上）' + (vWhy ? '：' + vWhy : ''));
+        }
+        if (vWhy) lines.push('     ⚠ ' + vWhy);
+        lines.push('     ↳ 看图补漏结果：补上 ' + vBack + ' / ' + vN + ' 道' +
+          (vBack >= vN ? ' ✓' : '（其余的照旧记进"没做的题"）'));
       }
       if (cfg.autoFill && !r.graded && obfN > 0) {
         /* 【保存这一步单独兜错】原来这里是 `catch (e) {}` ——
