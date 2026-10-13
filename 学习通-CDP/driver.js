@@ -169,7 +169,10 @@ function onlyQuizLike(s) {
    ★ 必须放**文件顶层**：5 个调用点分处不同作用域，写成局部函数会踩"未定义" ✗
      （onlyQuizLike 那一课就在上面 119-125 行的注释里记着：崩过 45 次。）
    ==========================================================================*/
-const HOLD_MAX_ROUNDS = 6;                        /* 同一章最多拦几轮 */
+const HOLD_MAX_ROUNDS = 3;                        /* 同一章最多拦几轮
+                                                     法师定：6 轮太多 ✗（6×5 秒 = 30 秒上限）
+                                                     3 轮 ≈ 15 秒：够给"点开那张卡"三次机会 ✓，
+                                                     再多就是拖 ✓；到上限照旧翻页 + 记待办 ✓ */
 const HOLD_OFF_ARG = process.argv.includes('--no-hold');
 const HOLD_OFF_FILE = path.join(__dirname, '_内部', '收口关闭.txt');
 const HOLD_QUIZLIKE_RE = /测验|作业|考试|讨论/;   /* 与 onlyQuizLike 里的判据保持同步 */

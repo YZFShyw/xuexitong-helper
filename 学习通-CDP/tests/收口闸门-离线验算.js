@@ -112,10 +112,10 @@ console.log('== 二、holdForPendingMedia（拦页 + 计数 + 到上限记待办
   const { api, logs, todos } = load();
   const s = sit({ taskStats: stats({ pending: 1, done: 2, pendingNames: ['视频'] }) });
   const rounds = [];
-  for (let k = 0; k < 7; k++) rounds.push(await api.holdForPendingMedia(s, '真值表用'));
-  check('同一章：前 6 轮全部拦下(true)', '[true,true,true,true,true,true]', JSON.stringify(rounds.slice(0, 6)));
-  check('同一章：第 7 次放行(false)（到上限）', false, rounds[6]);
-  has('第 1 轮日志含"第 1/6 轮"', '（第 1/6 轮，出口：真值表用）', logs[0]);
+  for (let k = 0; k < 5; k++) rounds.push(await api.holdForPendingMedia(s, '真值表用'));
+  check('同一章：前 3 轮全部拦下(true)', '[true,true,true]', JSON.stringify(rounds.slice(0, 3)));
+  check('同一章：第 4 次放行(false)（到上限）', false, rounds[3]);
+  has('第 1 轮日志含"第 1/3 轮"', '（第 1/3 轮，出口：真值表用）', logs[0]);
   has('第 1 轮日志含"先不翻页，回去把它点开 ✓"', '还有视频/文档类任务点没完成 ⇒ 先不翻页，回去把它点开 ✓', logs[0]);
   has('到上限日志含"到上限，先翻页，记待办"', '到上限，先翻页，记待办', logs.join('\n'));
   check('到上限时真的写了 1 条待办', 1, todos.length);
@@ -126,8 +126,8 @@ console.log('== 二、holdForPendingMedia（拦页 + 计数 + 到上限记待办
   /* 换章 = 计数独立（侧面对应"换章清零"）*/
   const s2 = sit({ chapter: '章B', taskStats: stats({ pending: 1, pendingNames: ['文档'] }) });
   await api.holdForPendingMedia(s2, '真值表用');
-  has('章B 的第 1 轮日志是"第 1/6 轮"', '（第 1/6 轮，出口：真值表用）', logs[logs.length - 1]);
-  check('章B 计数与章A 互不影响（章B=1、章A=6）', '1/6', api.holdRounds['章B'] + '/' + api.holdRounds['章A']);
+  has('章B 的第 1 轮日志是"第 1/3 轮"', '（第 1/3 轮，出口：真值表用）', logs[logs.length - 1]);
+  check('章B 计数与章A 互不影响（章B=1、章A=3）', '1/3', api.holdRounds['章B'] + '/' + api.holdRounds['章A']);
 }
 {
   /* 【第二道尺子】拦截日志必须能看出对账过程（数字来自页面数据）*/
