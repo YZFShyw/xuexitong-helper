@@ -232,6 +232,38 @@ const HOLD_MIN_GAP_MS = 5000;                /* 两轮之间最少隔 5 秒
                                                  驱动器自己点完任务点也只等 1.8 秒 ✓
                                                  ⇒ 6 轮约 30 秒，既不空转也不干等 ✓） */
 const holdLastAt = Object.create(null);      /* 每章上一次拦截的时刻 */
+const holdPlayingLogged = Object.create(null); /* "视频正在播，不记轮"那行日志每章只打一次 */
+/* 【视频正在播 ⇒ 不消耗轮次】（2026-10-13 真机发现）
+   实测：卡级枚举把第 2 个视频拉起来后（进度 6.7s → 11.7s 在走 ✓），
+   3 轮 15 秒一到就翻页 ⇒ **刚播 12 秒就被丢下** ✗（那个视频 722 秒 ✗）。
+   所以：页面上只要有视频**正在推进**（currentTime 在涨 ✓）⇒ 不记轮次、继续等 ✓；
+   一旦**没有**视频在走（停了/在加载/压根没有）⇒ 才记一轮 ⇒ 攒够 3 轮仍翻页 + 记待办 ✓。
+   这样既不丢正在播的视频 ✓，也不会因为"平台永远不让它播"而死死卡住 ✓。 */
+const VIDEO_PROGRESS = `(function(){
+  function walk(doc, depth, acc){
+    if (!doc || !doc.body || depth > 3) return;
+    var vs = null; try { vs = doc.querySelectorAll('video'); } catch (e) { vs = null; }
+    if (vs) for (var i = 0; i < vs.length; i++){
+      var v = vs[i];
+      var cur = -1, dur = -1, paused = true;
+      try { cur = Math.round(v.currentTime * 10) / 10; } catch (e) {}
+      try { dur = (v.duration && isFinite(v.duration)) ? Math.round(v.duration) : -1; } catch (e) {}
+      try { paused = !!v.paused; } catch (e) {}
+      if (cur < 0) continue;
+      acc.all++;
+      if (!paused && cur > 0) { acc.playing++; if (cur > acc.maxCur) { acc.maxCur = cur; acc.maxDur = dur; } }
+    }
+    var fs2 = null; try { fs2 = doc.querySelectorAll('iframe'); } catch (e) { return; }
+    for (var k = 0; k < fs2.length; k++){
+      var cd = null; try { cd = fs2[k].contentDocument; } catch (e) { cd = null; }
+      if (cd) walk(cd, depth + 1, acc);
+    }
+  }
+  var acc = { all: 0, playing: 0, maxCur: -1, maxDur: -1 };
+  walk(document, 0, acc);
+  return { all: acc.all, playing: acc.playing, cur: acc.maxCur, dur: acc.maxDur };
+})()`;
+let lastVideoCur = -1;                       /* 上一次看到的进度（用来判断"在涨没涨"✓） */
 /* 闸门本体：true = 已拦下（调用处 continue 回主循环）；false = 放行（照旧翻页）。
    why 只进日志，说清是哪个出口要翻页。
    ★ async（2026-10-13）：轮次要隔 20 秒 ⇒ 里面要 await sleep ⇒ 调用处必须 await ✓ */
@@ -240,6 +272,25 @@ async function holdForPendingMedia(s, why) {
   if (!mediaHoldNeeded(s)) return false;
   const ch = (s && s.chapter) || '';
   const used = holdRounds[ch] || 0;
+  /* 【视频正在播 ⇒ 拦下但不记轮】（2026-10-13 真机：拉起来的第二个视频刚播 12 秒就被翻页丢掉 ✗）
+     判据：页面上有 video 既没暂停、currentTime 又在涨 ✓
+     ⇒ 让它安心播 ✓（不消耗 3 轮上限）；停了/没在涨 ⇒ 落回下面的正常计数 ✓（防死锁 ✓） */
+  let vp = null;
+  try { vp = await ev(VIDEO_PROGRESS); } catch (e) { vp = null; }
+  if (vp && typeof vp === 'object' && vp.playing > 0 && vp.cur > 0) {
+    const moving = (vp.cur > (lastVideoCur >= 0 ? lastVideoCur : vp.cur - 1));
+    lastVideoCur = vp.cur;
+    if (moving) {
+      if (!holdPlayingLogged[ch]) {
+        holdPlayingLogged[ch] = true;
+        log('  ↳ 收口：视频正在播（' + vp.cur + 's' + (vp.dur > 0 ? ('/' + vp.dur + 's') : '') +
+            '）⇒ 不消耗轮次，让它播完 ✓');
+      }
+      return true;   /* 拦下，但不记轮、不 sleep ✓ */
+    }
+  } else {
+    lastVideoCur = -1;   /* 没有视频在播 ⇒ 复位，下一次重新判断 ✓ */
+  }
   /* 【到上限：立刻放行，绝不在这一步 sleep】（顺序要紧：先判上限、再谈间隔 ✓）
      否则到上限之后每一次出口调用都会白睡 20 秒 ✗ */
   if (used >= HOLD_MAX_ROUNDS) {
