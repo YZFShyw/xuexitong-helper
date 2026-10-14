@@ -2034,7 +2034,15 @@ const PENDING_VIDEO_CARD = `(function(){
   }
   if (!pick) return { ok: false, why: (total ? '没有未完成的视频卡（全都带完成戳）' : '这一章一张视频卡都没有'),
                       total: total, done: done, pending: pending };
-  var pos = topCoord(pick);
+  /* 【点哪儿才算"切到这张卡"】（2026-10-13 真机实测）
+     点卡的**正中心** = 点播放器画面 ⇒ 只会播放/暂停 ✗，不会切卡 ✗
+     （实测：连点三次同一坐标，那张卡始终没被打开 ✓）
+     平台的"选项行"是卡内那条 div.ans-job-icon（role="option" tabindex=0，
+     aria-label="任务点未完成/已完成"）—— **点它**才是"选这张卡" ✓✓
+     ⇒ 优先取它的中心；取不到再退回卡中心（保守 ✓）。 */
+  var anchor = null;
+  try { anchor = pick.querySelector('.ans-job-icon') || null; } catch (e) { anchor = null; }
+  var pos = topCoord(anchor || pick);
   if (!pos) return { ok: false, why: '算不出坐标', total: total, done: done, pending: pending };
   return { ok: true, x: pos.x, y: pos.y, w: pos.w, h: pos.h, total: total, done: done,
            idx: idx, pending: pending, inView: pos.inView, why: '' };
@@ -2491,9 +2499,118 @@ const DOC_STEP = `(function(){
      找不到可点的卡时只打一行说明，绝不假装点过（说点了就必须真的点了 ✓）。
      ★ 只在收口闸门**真的拦下**（holdForPendingMedia 返回 true）之后才会走到这里 ⇒
        --no-hold / _内部\收口关闭.txt 两个开关照旧让整条链（含点卡）一起失效 ✓。 */
+  /* 【把"下一张没播的视频"真的播起来】（2026-10-13 真机定位后的定稿做法）
+     实测（章 3.4 相关资料，4 张视频卡）：
+       · 4 张卡是**4 个独立播放器叠着排**（每张卡自带 iframe + data.name=第一讲-秦昊0N.mp4）
+         —— 平台**没有"切卡"这个动作** ✗，所以"点选项行"点三次都没反应 ✗（已实测）
+       · 卡 2/3/4 的 <video> 一开始"无元数据" ✗ —— 因为播放器还没被拉起来
+       ⇒ 正确做法：**滚进视口 + 进它自己的 iframe 里 load()/play()** ✓
+         （驱动器平时就是把视频 load() 拉起来的：「▶ 续播成功（本次靠 load() 把数据拉起来）」✓）
+     返回对象（不是 JSON 字符串 ✗ —— evalOnce 给的就是值本身 ✓）：
+       { ok, name, total, done, idx, started, cur, dur, why } */
+  const PLAY_PENDING_VIDEO = `(function(){
+    var out = { ok: false, name: '', total: 0, done: 0, idx: 0, started: false, cur: -1, dur: -1, why: '' };
+    var FIN = /ans-job-finished|jobFinish|job-finished|icon_Completed/;
+    function isDone(el){
+      try { if (FIN.test(String(el.className || ''))) return true; } catch (e) {}
+      try {
+        var ic = el.querySelector('.ans-job-icon');
+        if (ic) {
+          if (FIN.test(String(ic.className || ''))) return true;
+          var al = String(ic.getAttribute('aria-label') || '');
+          if (al.indexOf('完成') >= 0 && al.indexOf('未完成') < 0) return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+    function allDocsOf(root, depth){
+      var o = [root];
+      if (!depth) return o;
+      var fs2; try { fs2 = root.querySelectorAll('iframe'); } catch (e) { return o; }
+      for (var i = 0; i < fs2.length && o.length < 12; i++){
+        try {
+          var cd = fs2[i].contentDocument || (fs2[i].contentWindow && fs2[i].contentWindow.document);
+          if (cd) { var sub = allDocsOf(cd, depth - 1); for (var k = 0; k < sub.length; k++) o.push(sub[k]); }
+        } catch (e) {}
+      }
+      return o;
+    }
+    function hasVideo(box){
+      try { if (box.querySelector('video')) return true; } catch (e) {}
+      try {
+        var ifr = box.querySelectorAll('iframe');
+        for (var i = 0; i < ifr.length; i++){
+          var src = String(ifr[i].getAttribute('src') || '');
+          if (src.indexOf('modules/video') >= 0 || src.indexOf('insertvideo') >= 0) return true;
+        }
+      } catch (e) {}
+      return false;
+    }
+    /* 找卡所在的那一层文档（后面要进它自己的 iframe 操作 video ✓） */
+    function frameDocOf(el){
+      try { return el.ownerDocument || document; } catch (e) { return document; }
+    }
+    var docs = allDocsOf(document, 3);
+    var cards = [];
+    for (var di = 0; di < docs.length; di++){
+      var g; try { g = docs[di].querySelectorAll('.ans-attach-ct'); } catch (e) { continue; }
+      for (var gi = 0; gi < g.length; gi++){
+        if (g[gi].tagName === 'IFRAME') continue;
+        if (!hasVideo(g[gi])) continue;
+        if (cards.indexOf(g[gi]) < 0) cards.push(g[gi]);
+      }
+    }
+    /* 去重到最外层（嵌套时只留外面那张） */
+    try { cards = cards.filter(function (el) { return !cards.some(function (o) { return o !== el && o.contains(el); }); }); } catch (e) {}
+    out.total = cards.length;
+    var pick = null, idx = 0;
+    for (var ci = 0; ci < cards.length; ci++){
+      if (isDone(cards[ci])) { out.done++; continue; }
+      if (!pick) { pick = cards[ci]; idx = ci + 1; }
+    }
+    out.idx = idx;
+    if (!pick) { out.why = (out.total ? '没有未完成的视频卡（全都带完成戳）' : '这一章一张视频卡都没有'); return out; }
+    try { pick.scrollIntoView({ block: 'center', inline: 'center' }); } catch (e) {}
+    /* 读这张卡的名字（在它自己的 iframe 的 data 属性里 ✓） */
+    try {
+      var ifr = pick.querySelector('iframe.ans-attach-online') || pick.querySelector('iframe');
+      if (ifr){
+        var d = String(ifr.getAttribute('data') || '');
+        var m = d.match(/"name":"([^"]+)"/);
+        if (m) { try { out.name = decodeURIComponent(JSON.parse('"' + m[1] + '"')); } catch (e2) { out.name = m[1]; } }
+      }
+    } catch (e) {}
+    /* 【关键一步】进它自己的 iframe，把 <video> 拉起来 */
+    var v = null;
+    try {
+      var idoc = frameDocOf(pick);
+      var fr = null; try { fr = pick.querySelectorAll('iframe'); } catch (e) { fr = null; }
+      var inner = null;
+      if (fr) for (var fi = 0; fi < fr.length; fi++){
+        var src2 = String(fr[fi].getAttribute('src') || '');
+        if (src2.indexOf('modules/video') < 0 && src2.indexOf('insertvideo') < 0) continue;
+        try { inner = fr[fi].contentDocument || (fr[fi].contentWindow && fr[fi].contentWindow.document); } catch (e) { inner = null; }
+        if (inner) break;
+      }
+      var here = inner || idoc;
+      try { v = here.querySelector('video'); } catch (e) { v = null; }
+    } catch (e) { v = null; }
+    if (!v) { out.why = '卡里没找到 video 元素（播放器还没渲染？）'; return out; }
+    try { if (v.paused === false) { out.started = true; } } catch (e) {}
+    if (!out.started) {
+      try { v.load(); } catch (e) {}
+      try { v.muted = true; } catch (e) {}
+      try { var pr = v.play(); if (pr && pr.catch) pr.catch(function () {}); } catch (e) {}
+    }
+    try { out.cur = Math.round(v.currentTime * 10) / 10; } catch (e) {}
+    try { out.dur = (v.duration && isFinite(v.duration)) ? Math.round(v.duration) : -1; } catch (e) {}
+    try { out.started = out.started || v.paused === false; } catch (e) {}
+    out.ok = true;
+    return out;
+  })()`;
   async function openFirstPendingVideoCard() {
     let r = null;
-    try { r = await ev(PENDING_VIDEO_CARD); } catch (e) { r = null; }
+    try { r = await ev(PLAY_PENDING_VIDEO); } catch (e) { r = null; }
     if (!r || typeof r !== 'object' || r.__err) {
       log('  ↳ 卡级枚举：探针没读到（页面没回话），这一轮先不点。');
       return false;
@@ -2503,11 +2620,16 @@ const DOC_STEP = `(function(){
           ' 张，已完成 ' + (r.done || 0) + ' 张），这一轮先不点。');
       return false;
     }
-    try { await clickTop(r.x, r.y); } catch (e) {}
     await sleep(1800);
-    log('  ↳ 卡级枚举：点开第 ' + r.idx + ' 张未完成的视频卡（共 ' + r.total + ' 张，已完成 ' + r.done +
-        ' 张）@(' + r.x + ',' + r.y + ') ' + r.w + 'x' + r.h +
-        (r.inView ? '' : '（在视口外，仍按坐标点一次）'));
+    /* 再探一次，看它有没有真的开始走（currentTime 有没有动 ✓）—— 不许假装播了 ✗ */
+    let after = null;
+    try { after = await ev(PLAY_PENDING_VIDEO); } catch (e) { after = null; }
+    const cur2 = (after && typeof after.cur === 'number') ? after.cur : -1;
+    const moved = (cur2 > 0 && cur2 > (typeof r.cur === 'number' ? r.cur : -1));
+    log('  ↳ 卡级枚举：拉起了第 ' + r.idx + ' 张未完成的视频卡（共 ' + r.total + ' 张，已完成 ' + r.done +
+        ' 张）' + (r.name ? ('「' + r.name + '」') : '') +
+        '　播放中=' + (r.started || moved ? '是 ✓' : '否 ✗') +
+        '　进度 ' + (cur2 >= 0 ? (cur2 + 's') : '?') + (r.dur > 0 ? ('/' + r.dur + 's') : ''));
     return true;
   }
 
