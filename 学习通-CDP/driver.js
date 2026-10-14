@@ -2666,6 +2666,13 @@ const DOC_STEP = `(function(){
   async function videoProgressProbe() {
     try {
       const r = await ev(VIDEO_PROGRESS);
+      if (r && typeof r === 'object' && r.playing > 0 && r.cur > 0 && r.cur > lastVideoCur) {
+        /* 【把"零推进计时器"喂饱】（2026-10-13 真机：视频刚播到 72.8s，就被「长时间零推进」强推走 ✗）
+           那条兜底出口**故意不受闸门管** ✓（法师定的：它是最后的保险 ✓）
+           —— 所以不能拦它 ✗，只能让驱动器**知道"我们在进展中"** ✓
+           markProgress 一调，90 秒计时器就重置 ⇒ 正在播的视频不会被它当成"干等"✗ */
+        try { markProgress('视频播放中 ' + r.cur + 's'); } catch (e) {}
+      }
       return (r && typeof r === 'object') ? r : null;
     } catch (e) { return null; }
   }
