@@ -1012,6 +1012,42 @@ const CHAIN = `
   }
 `;
 
+/* 【平台风控 / 验证码页检测】（2026-10-14 事故的直接产物）
+   事故：账号被平台标【9010】操作异常 ⇒ 内容区被换成验证码页 ✗
+   驱动器**看不见内容** ⇒ 判"本节没有可播的内容" ⇒ 点「下一节」永远没反应 ⇒
+   外套每 15 秒重拉一轮、每轮空点 40 次 ⇒ 3 个多小时点了一千多次 ✗✗
+   现在：每轮主循环 + 每次"翻节失败到上限"之前都先跑这个探针；
+   命中（顶层或内容框里出现验证页）⇒ 写停止标记（外套不再重拉）+ 退出等人处理 ✓。
+   只认"验证码页/9010/操作异常"这几条硬特征，普通页面绝不误伤 ✗ */
+const BLOCKED_CHECK = `(function(){
+  function hitDoc(doc){
+    try {
+      var u = '';
+      try { u = String((doc.location && doc.location.href) || ''); } catch (e) { u = ''; }
+      if (u.indexOf('antispider') >= 0 || u.indexOf('processVerify') >= 0) return u || 'antispider';
+      if (!doc || !doc.body) return '';
+      try { if (doc.getElementById && doc.getElementById('ucode')) return u || 'ucode'; } catch (e) {}
+      var t = String(doc.body.innerText || '');
+      if (t.indexOf('操作异常') >= 0) return u || '操作异常';
+      if (t.indexOf('请输入图片中的验证码') >= 0) return u || '验证码题面';
+      if (t.indexOf('【9010】') >= 0) return u || '9010';
+    } catch (e) {}
+    return '';
+  }
+  var top = hitDoc(document);
+  if (top) return { hit: true, where: 'top', href: top.slice(0, 140) };
+  var fs = null;
+  try { fs = document.querySelectorAll('iframe'); } catch (e) { fs = null; }
+  if (fs) for (var i = 0; i < fs.length; i++){
+    var cd = null;
+    try { cd = fs[i].contentDocument; } catch (e) { cd = null; }
+    if (!cd) continue;
+    var h = hitDoc(cd);
+    if (h) return { hit: true, where: 'iframe', href: h.slice(0, 140) };
+  }
+  return { hit: false };
+})()`;
+
 const PROBE = `(function(){
   /* chain() 是从**顶层 document** 出发往下钻的，算出来的 ox/oy 是"相对顶层视口"的坐标。
      要是这段被塞进某个内层 iframe 里执行，它会把那一层的坐标当成顶层坐标报回来 ——
@@ -3334,6 +3370,42 @@ const DOC_STEP = `(function(){
     }
   }
 
+  /* 【通用"停止标记"写法】（2026-10-14 新增）
+     给"平台风控"这类**需要人看一眼**的情况复用：语义与保存闸门的一致 ——
+     写了它，外套（_内部\驱动器循环.cmd）就不会 15 秒后自动重拉 ✓
+     清除：控制台点「开始」会自动清掉；也可以手动删 _内部\停止标记.txt ✓ */
+  function writeStopFlagText(reason) {
+    const flag = (saveGateMod && saveGateMod.makeStopFlag)
+      ? saveGateMod.makeStopFlag({ chapter: lastChapter, reason: reason })
+      : { reason: reason, chapter: lastChapter, at: new Date().toISOString() };
+    const text = (saveGateMod && saveGateMod.formatStopFlag)
+      ? saveGateMod.formatStopFlag(flag)
+      : ('需要人工处理：' + reason + '\r\n');
+    try {
+      fs.mkdirSync(path.dirname(STOP_FLAG_FILE), { recursive: true });
+      fs.writeFileSync(STOP_FLAG_FILE, text, 'utf8');
+      return { ok: true, file: STOP_FLAG_FILE };
+    } catch (e) {
+      return { ok: false, error: (e && e.message) || String(e) };
+    }
+  }
+  /* 【平台风控检测】命中 ⇒ 写停止标记 + 记日志（重复调用不重复刷屏） */
+  let verifyBlockedLogged = false;
+  async function verifyBlockedCheck() {
+    let b = null;
+    try { b = await ev(BLOCKED_CHECK); } catch (e) { b = null; }
+    if (!b || !b.hit) return false;
+    if (verifyBlockedLogged) return true;
+    verifyBlockedLogged = true;
+    log('⚠ 平台风控：页面出现验证码/操作异常' + (b.where === 'iframe' ? '（在内容框里）' : '') +
+        (b.href ? '：' + b.href : ''));
+    log('  驱动器停下：不再点任何东西，也不让外套自动重拉（越点越像机器人 ✗）。');
+    const w = writeStopFlagText('平台要求验证码（9010 操作异常），待人工输入');
+    if (w.ok) log('  ↳ 已写 _内部\\停止标记.txt ✓ —— 在浏览器里输完验证码，点控制台「开始」就能接着跑。');
+    else log('  ⚠ 停止标记没写成（' + w.error + '）—— 请手动停止，别让外套自动重拉。');
+    return true;
+  }
+
   /* 过闸门。返回 'continue' / 'stop-manual' / 'stop-quiz' */
   function gateCheck(where, saveAttempted) {
     if (!saveGateMod) return 'continue';   /* 模块没加载上：退回原来的行为，至少要说清楚 */
@@ -3492,7 +3564,11 @@ const DOC_STEP = `(function(){
           if (advanceFails % 5 === 0) log('  连着 ' + advanceFails + ' 次找不到「下一节」，不退出了，隔一会再找。');
           await sleep(8000);
           if (advanceFails >= 40) {
-            log('连续 40 次找不到「下一节」—— 要么这一章真到头了，要么页面出问题了，停下。');
+            if (await verifyBlockedCheck()) {
+              log('  ↳ 上面已按"平台要验证码"处理（写了停止标记）。');
+            } else {
+              log('连续 40 次找不到「下一节」—— 要么这一章真到头了，要么页面出问题了，停下。');
+            }
             advanceDead = true;
           }
         }
@@ -3563,7 +3639,23 @@ const DOC_STEP = `(function(){
     }
     advanceFails++;
     if (advanceFails <= 2 || advanceFails % 5 === 0) log('点了「下一节」但章节 20 秒没换（第 ' + advanceFails + ' 次，不退出了）。');
-    if (advanceFails >= 40) { log('连续 40 次翻节失败（约 13 分钟），停下。'); advanceDead = true; }
+    /* 【点不动 10 次就真停】（2026-10-14 事故的直接产物）
+       事故：内容区被换成验证码页 ⇒「本节没有可播的内容」+ 点「下一节」永远没反应 ✗
+       外套每 15 秒重拉一轮、每轮空点 40 次 ⇒ 3 个多小时点了一千多次 ⇒ 账号被标【9010】✗✗
+       实测这种"点得动、没反应"从不自愈（连着 8 次运行全是白点）⇒
+       宁早停：10 次（约 3 分钟）就停下 + 写停止标记（外套不会再自动重拉）。 */
+    if (advanceFails >= 10) {
+      if (await verifyBlockedCheck()) {
+        log('  ↳ 上面已按"平台要验证码"处理（写了停止标记，外套不会再重拉）。');
+      } else {
+        log('连续 10 次点「下一节」章节都没换（约 3 分钟）—— 不再空点，停下。');
+        log('  看一眼浏览器那个页面：多半是平台风控/要验证码，或这一章被卡住。');
+        const w = writeStopFlagText('翻节连续 10 次点不动，待人工看一眼');
+        if (w.ok) log('  ↳ 已写 _内部\\停止标记.txt（外套不会再自动重拉）；处理完点控制台「开始」接着跑。');
+        else log('  ⚠ 停止标记没写成（' + w.error + '）—— 请手动停止，别让它自动重拉。');
+      }
+      advanceDead = true;
+    }
     return false;
   }
 
@@ -3644,6 +3736,10 @@ const DOC_STEP = `(function(){
       continue;
     }
     evFails = 0;
+
+    /* 【平台风控检测】每轮都看一眼：页面要是变成了验证码页（【9010】操作异常），
+       立刻停手（2026-10-14 事故：在看不见的坏页面上死点了一千多次 ⇒ 账号被风控 ✗）。 */
+    if (await verifyBlockedCheck()) break;
 
     /* 【零推进兜底】连续 90 秒没有任何"真进展"，就说明有分支在空转 ——
        这一类 bug 的症状都一样：进程活着、CPU 不动、日志不写，事后极难查
