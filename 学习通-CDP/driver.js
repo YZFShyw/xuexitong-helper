@@ -266,8 +266,12 @@ const VIDEO_PROGRESS = `(function(){
 let lastVideoCur = -1;                       /* 上一次看到的进度（用来判断"在涨没涨"✓） */
 /* 闸门本体：true = 已拦下（调用处 continue 回主循环）；false = 放行（照旧翻页）。
    why 只进日志，说清是哪个出口要翻页。
-   ★ async（2026-10-13）：轮次要隔 20 秒 ⇒ 里面要 await sleep ⇒ 调用处必须 await ✓ */
-async function holdForPendingMedia(s, why) {
+   ★ async（2026-10-13）：轮次要隔 5 秒 ⇒ 里面要 await sleep ⇒ 调用处必须 await ✓
+  ★ vp（2026-10-13 二次修）：视频进度必须由**调用方**先探好再传进来 ✗
+    —— 一开始我在这里直接调 ev()，可**这个函数不在主作用域**（那里才有 ev）✗，
+       抛出的错又被自己的 try/catch 静默吞掉 ⇒ "正在播就不记轮"从来没生效 ✗（真机抓到的）
+    —— 主作用域里的 videoProgressProbe() 负责探，结果作为第三个参数传进来 ✓ */
+async function holdForPendingMedia(s, why, vp) {
   if (holdGateDisabled()) return false;
   if (!mediaHoldNeeded(s)) return false;
   const ch = (s && s.chapter) || '';
@@ -275,8 +279,6 @@ async function holdForPendingMedia(s, why) {
   /* 【视频正在播 ⇒ 拦下但不记轮】（2026-10-13 真机：拉起来的第二个视频刚播 12 秒就被翻页丢掉 ✗）
      判据：页面上有 video 既没暂停、currentTime 又在涨 ✓
      ⇒ 让它安心播 ✓（不消耗 3 轮上限）；停了/没在涨 ⇒ 落回下面的正常计数 ✓（防死锁 ✓） */
-  let vp = null;
-  try { vp = await ev(VIDEO_PROGRESS); } catch (e) { vp = null; }
   if (vp && typeof vp === 'object' && vp.playing > 0 && vp.cur > 0) {
     const moving = (vp.cur > (lastVideoCur >= 0 ? lastVideoCur : vp.cur - 1));
     lastVideoCur = vp.cur;
@@ -2659,6 +2661,14 @@ const DOC_STEP = `(function(){
     out.ok = true;
     return out;
   })()`;
+  /* 【视频进度探针】（主作用域里才有 ev ✓ —— 闸门那边不能直接调 ✗，所以在这里探、传进去 ✓）
+     探不到（页面没回话/抛错）⇒ 返回 null ⇒ 闸门落回正常计数 ✓（静默失败也不假装在播 ✓） */
+  async function videoProgressProbe() {
+    try {
+      const r = await ev(VIDEO_PROGRESS);
+      return (r && typeof r === 'object') ? r : null;
+    } catch (e) { return null; }
+  }
   async function openFirstPendingVideoCard() {
     let r = null;
     try { r = await ev(PLAY_PENDING_VIDEO); } catch (e) { r = null; }
@@ -3884,7 +3894,7 @@ const DOC_STEP = `(function(){
         if (Date.now() - hbDoneAt > 15000) {
           log('伪心跳报满后 15 秒仍未进入「播放完成」分支，直接按本节完成处理。');
           /* 【收口闸门 1/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
-          if (NEXT && await holdForPendingMedia(s, '伪心跳报满兜底')) { await openFirstPendingVideoCard(); continue; }
+          if (NEXT && await holdForPendingMedia(s, '伪心跳报满兜底', await videoProgressProbe())) { await openFirstPendingVideoCard(); continue; }
           if (NEXT) { await advance('伪心跳已把进度报到片尾。'); if (advanceDead) break; }
           else await sleep(2000);
           continue;
@@ -3901,7 +3911,7 @@ const DOC_STEP = `(function(){
         if (doc.ended) {
           if (!announcedDone) { announcedDone = true; log('✅ 文档阅读到底了：' + doc.pct + '%   （' + doc.type + '）'); }
           /* 【收口闸门 2/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
-          if (NEXT && await holdForPendingMedia(s, '文档读完')) { await openFirstPendingVideoCard(); continue; }
+          if (NEXT && await holdForPendingMedia(s, '文档读完', await videoProgressProbe())) { await openFirstPendingVideoCard(); continue; }
           if (NEXT) { await advance('文档读完了。'); if (advanceDead) break; }
           else await sleep(2000);
           continue;
@@ -3910,7 +3920,7 @@ const DOC_STEP = `(function(){
         if (docStuck >= 6) {
           log('⚠ 文档滚不动了（卡在 ' + doc.pct + '%，' + doc.type + '），不再干滚，先看这一章还有什么。');
           /* 【收口闸门 3/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
-          if (NEXT && await holdForPendingMedia(s, '文档滚不动')) { await openFirstPendingVideoCard(); continue; }
+          if (NEXT && await holdForPendingMedia(s, '文档滚不动', await videoProgressProbe())) { await openFirstPendingVideoCard(); continue; }
           if (NEXT) { await advance('文档滚不动了。'); if (advanceDead) break; }
           else await sleep(3000);
           continue;
@@ -4094,7 +4104,7 @@ const DOC_STEP = `(function(){
         log('这一章没有可播的内容。' + (s.platformDone ? '平台已标记完成。' : ''));
       }
       /* 【收口闸门 4/5】还有视频/文档类任务点没完成 ⇒ 先不翻页（同一章最多 6 轮）*/
-      if (NEXT && await holdForPendingMedia(s, '没有可播内容')) { await openFirstPendingVideoCard(); continue; }
+      if (NEXT && await holdForPendingMedia(s, '没有可播内容', await videoProgressProbe())) { await openFirstPendingVideoCard(); continue; }
       if (NEXT) { await advance('本节没有可播的内容。'); if (advanceDead) break; }
       else await sleep(2000);
       continue;
@@ -4238,7 +4248,7 @@ const DOC_STEP = `(function(){
       /* 同一章可能还有文档任务，接着把文档滚完（跟"测验填完了"那条路共用同一段） */
       if (await scrollDocThenContinue()) continue;
       /* 【收口闸门 5/5】还有视频/文档类任务点没完成 ⇒ 先不翻页（同一章最多 6 轮）*/
-      if (NEXT && await holdForPendingMedia(s, '本节已完成')) { await openFirstPendingVideoCard(); continue; }
+      if (NEXT && await holdForPendingMedia(s, '本节已完成', await videoProgressProbe())) { await openFirstPendingVideoCard(); continue; }
       if (NEXT) { await advance('本节已完成。'); if (advanceDead) break; continue; }
       await sleep(2000);
       continue;
