@@ -1920,6 +1920,126 @@ const ACTIVATE_TASK = `(function(){
            tag: el.tagName + '.' + String(el.className || '').trim().split(/\\s+/)[0] };
 })()`;
 
+/* ------------------------------------------------------------------ */
+/* 【卡级视频枚举探针（2026-10-13 追加，法师要求）】
+   由来（真机实测，章 3.4 相关资料）：这一章有 **4 张视频卡**
+   （div.ans-attach-ct.videoContainer），但平台自己的任务点计数**只算 1 个** ——
+   第一张播完，平台就说"这一章完成"（日志：✅ 视频播完：35:03（平台已把这一章标记完成）
+   任务点 1/1），驱动器接着去翻页，后面 3 张视频卡**永远没人点开** ✗。
+   所以这里单独枚举"有视频、但还没有完成戳"的卡，把第一张找出来（调用方去点开）。
+
+   两个必须踩稳的点：
+     · **总容器 .ans-cc 不算卡**：它把里面 4 张卡全包着，判据一放进来就会数成 5 张 ✗
+       ⇒ 选择器里只认 .ans-attach-ct / .ans-attach-online（.ans-cc 故意不写进来 ✓）；
+     · 坐标必须换算到**顶层窗口**：卡在多层 iframe 里，直接量 getBoundingClientRect
+       得到的是它自己那个文档里的坐标，点下去就会点错位置 ✗
+       ⇒ 照 ACTIVATE_TASK 里 topCoord 那套"一层层加 iframe 偏移"的算法 ✓。
+
+   完成戳判据与 PROBE 里那份（step.videoDone 的对账）保持同一套：FIN 正则 +
+   .ans-job-icon 的 class / aria-label（aria 里写着"未完成"的不算完成 ✓），
+   这样"卡级枚举"报的 total/done 与收口闸门打的那行"对账"能互相对上 ✓。
+
+   返回 { ok, x, y, w, h, total, done, idx, pending, why }：
+     · ok:true  = 找到一张未完成的视频卡，已 scrollIntoView（x/y = 卡中心，换算到顶层）；
+                  idx = 这张卡在**全部视频卡**里的序号（1 起，日志里"第 k 张"用它）。
+     · ok:false = 没有可点的卡（why 说清是"一张视频卡都没有"还是"全带完成戳"）。
+   这段在模板字符串里 —— **不用反引号、不用带斜杠的正则**（一律 indexOf）✓。 */
+const PENDING_VIDEO_CARD = `(function(){
+  var FIN = /ans-job-finished|jobFinish|job-finished|icon_Completed/;
+  function isDone(el){
+    try {
+      if (FIN.test(String(el.className || ''))) return true;
+      var ic = el.querySelector('.ans-job-icon');
+      if (ic) {
+        if (FIN.test(String(ic.className || ''))) return true;
+        var aria = String(ic.getAttribute('aria-label') || '');
+        if (aria.indexOf('完成') >= 0 && aria.indexOf('未完成') < 0) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  function allDocsOf(root, depth){
+    var out = [root];
+    if (!depth) return out;
+    var frames; try { frames = root.querySelectorAll('iframe'); } catch (e) { return out; }
+    for (var i = 0; i < frames.length; i++){
+      try {
+        var cd = frames[i].contentDocument || (frames[i].contentWindow && frames[i].contentWindow.document);
+        if (cd) { var sub = allDocsOf(cd, depth - 1); for (var k = 0; k < sub.length; k++) out.push(sub[k]); }
+      } catch (e) {}
+      if (out.length > 12) break;
+    }
+    return out;
+  }
+  /* 卡里有没有视频：video 模块 iframe（src 含 modules/video 或 insertvideo）或 <video>；
+     两样都要能穿透嵌套 iframe（真机上 <video> 就藏在卡内的嵌套 iframe 里 ✓）。 */
+  function hasVideo(box){
+    var hit = false;
+    (function walk(root, dep){
+      if (!root || dep > 3 || hit) return;
+      var fs = null; try { fs = root.querySelectorAll('iframe'); } catch (e) { fs = null; }
+      if (fs) for (var i = 0; i < fs.length; i++){
+        var src = ''; try { src = String(fs[i].getAttribute('src') || ''); } catch (e) {}
+        if (src.indexOf('modules/video') >= 0 || src.indexOf('insertvideo') >= 0) { hit = true; return; }
+      }
+      var vv = null; try { vv = root.querySelectorAll('video'); } catch (e) { vv = null; }
+      if (vv && vv.length > 0) { hit = true; return; }
+      if (fs) for (var j = 0; j < fs.length; j++){
+        var cd = null; try { cd = fs[j].contentDocument; } catch (e) { cd = null; }
+        if (cd) walk(cd, dep + 1);
+      }
+    })(box, 0);
+    return hit;
+  }
+  /* 坐标换算到顶层窗口（照 ACTIVATE_TASK 里 topCoord 的算法抄，别自己另写一套 ✓） */
+  function topCoord(el){
+    if (!el) return null;
+    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (e) {}
+    var r = el.getBoundingClientRect();
+    var x = r.left + r.width / 2, y = r.top + r.height / 2;
+    var win = null;
+    try { win = el.ownerDocument.defaultView; } catch (e) { win = null; }
+    while (win && win !== window) {
+      var fe = null;
+      try { fe = win.frameElement; } catch (e) { fe = null; }
+      if (!fe) break;
+      var fr = fe.getBoundingClientRect();
+      x += fr.left; y += fr.top;
+      win = win.parent;
+    }
+    return { x: Math.round(x), y: Math.round(y), w: Math.round(r.width), h: Math.round(r.height),
+             inView: (x >= 0 && y >= 0 && x <= window.innerWidth && y <= window.innerHeight) };
+  }
+  /* 收卡：只认 .ans-attach-ct / .ans-attach-online（**故意不含 .ans-cc**，见上面注释），
+     收完去重到最外层（.ans-attach-online 常常是卡里的子元素，不去重会重复计数 ✗）。 */
+  var docs = allDocsOf(document, 3);
+  var cards = [];
+  for (var di = 0; di < docs.length; di++){
+    try {
+      var g = docs[di].querySelectorAll('.ans-attach-ct, .ans-attach-online');
+      for (var gi = 0; gi < g.length; gi++){
+        if (g[gi].tagName === 'IFRAME') continue;
+        if (cards.indexOf(g[gi]) < 0) cards.push(g[gi]);
+      }
+    } catch (e) {}
+  }
+  try { cards = cards.filter(function (el) { return !cards.some(function (o) { return o !== el && o.contains(el); }); }); } catch (e) {}
+  var total = 0, done = 0, pending = 0, pick = null, idx = 0;
+  for (var ci = 0; ci < cards.length; ci++){
+    if (!hasVideo(cards[ci])) continue;
+    total++;
+    if (isDone(cards[ci])) { done++; continue; }
+    pending++;
+    if (!pick) { pick = cards[ci]; idx = total; }
+  }
+  if (!pick) return { ok: false, why: (total ? '没有未完成的视频卡（全都带完成戳）' : '这一章一张视频卡都没有'),
+                      total: total, done: done, pending: pending };
+  var pos = topCoord(pick);
+  if (!pos) return { ok: false, why: '算不出坐标', total: total, done: done, pending: pending };
+  return { ok: true, x: pos.x, y: pos.y, w: pos.w, h: pos.h, total: total, done: done,
+           idx: idx, pending: pending, inView: pos.inView, why: '' };
+})()`;
+
 /* 文档阅读：用作者的三处容器和 400px 步长，但「读到没读到」的判断自己写严。
    他原码里有两处 ended 写死 true（什么都不滚的时候直接返回 100%），
    那正是「3 秒判定已读然后翻页」的根源 —— 这里不沿用。 */
@@ -2359,6 +2479,36 @@ const DOC_STEP = `(function(){
     await c.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', buttons: 1, clickCount: 1 });
     await sleep(90);
     await c.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', buttons: 0, clickCount: 1 });
+  }
+
+  /* 【卡级枚举：把"第一张没带完成戳的视频卡"主动点开（2026-10-13 追加，法师要求）】
+     为什么要有它：平台自己的任务点计数只算 1 个 —— 第一张视频卡播完，平台就说
+     "这一章完成"，驱动器接着去翻页，后面几张视频卡**永远没人点开** ✗
+     （真机日志：✅ 视频播完：35:03（平台已把这一章标记完成）   任务点 1/1）。
+     收口闸门拦下之后调用它：主动点开第一张未完成的视频卡，让它的 <video> 进 DOM，
+     下一轮 PROBE 就能看见、接着播 ✓ —— 这正是 5 个内容型出口都拦不住的那条路。
+     点开的到底是**第几张**、坐标对不对，直接写进日志（数字全部来自探针，来自页面 ✓）；
+     找不到可点的卡时只打一行说明，绝不假装点过（说点了就必须真的点了 ✓）。
+     ★ 只在收口闸门**真的拦下**（holdForPendingMedia 返回 true）之后才会走到这里 ⇒
+       --no-hold / _内部\收口关闭.txt 两个开关照旧让整条链（含点卡）一起失效 ✓。 */
+  async function openFirstPendingVideoCard() {
+    let r = null;
+    try { r = await ev(PENDING_VIDEO_CARD); } catch (e) { r = null; }
+    if (!r || typeof r !== 'object' || r.__err) {
+      log('  ↳ 卡级枚举：探针没读到（页面没回话），这一轮先不点。');
+      return false;
+    }
+    if (!r.ok) {
+      log('  ↳ 卡级枚举：没有可点的视频卡（' + (r.why || '未知') + '；共 ' + (r.total || 0) +
+          ' 张，已完成 ' + (r.done || 0) + ' 张），这一轮先不点。');
+      return false;
+    }
+    try { await clickTop(r.x, r.y); } catch (e) {}
+    await sleep(1800);
+    log('  ↳ 卡级枚举：点开第 ' + r.idx + ' 张未完成的视频卡（共 ' + r.total + ' 张，已完成 ' + r.done +
+        ' 张）@(' + r.x + ',' + r.y + ') ' + r.w + 'x' + r.h +
+        (r.inView ? '' : '（在视口外，仍按坐标点一次）'));
+    return true;
   }
 
   /* 【点之前先看清"那个坐标上现在到底是什么"】2026-10-13 实测（微分的几何动图）：
@@ -3561,7 +3711,7 @@ const DOC_STEP = `(function(){
         if (Date.now() - hbDoneAt > 15000) {
           log('伪心跳报满后 15 秒仍未进入「播放完成」分支，直接按本节完成处理。');
           /* 【收口闸门 1/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
-          if (NEXT && await holdForPendingMedia(s, '伪心跳报满兜底')) continue;
+          if (NEXT && await holdForPendingMedia(s, '伪心跳报满兜底')) { await openFirstPendingVideoCard(); continue; }
           if (NEXT) { await advance('伪心跳已把进度报到片尾。'); if (advanceDead) break; }
           else await sleep(2000);
           continue;
@@ -3578,7 +3728,7 @@ const DOC_STEP = `(function(){
         if (doc.ended) {
           if (!announcedDone) { announcedDone = true; log('✅ 文档阅读到底了：' + doc.pct + '%   （' + doc.type + '）'); }
           /* 【收口闸门 2/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
-          if (NEXT && await holdForPendingMedia(s, '文档读完')) continue;
+          if (NEXT && await holdForPendingMedia(s, '文档读完')) { await openFirstPendingVideoCard(); continue; }
           if (NEXT) { await advance('文档读完了。'); if (advanceDead) break; }
           else await sleep(2000);
           continue;
@@ -3587,7 +3737,7 @@ const DOC_STEP = `(function(){
         if (docStuck >= 6) {
           log('⚠ 文档滚不动了（卡在 ' + doc.pct + '%，' + doc.type + '），不再干滚，先看这一章还有什么。');
           /* 【收口闸门 3/5】还有视频/文档类任务点没完成 ⇒ 先不翻页 */
-          if (NEXT && await holdForPendingMedia(s, '文档滚不动')) continue;
+          if (NEXT && await holdForPendingMedia(s, '文档滚不动')) { await openFirstPendingVideoCard(); continue; }
           if (NEXT) { await advance('文档滚不动了。'); if (advanceDead) break; }
           else await sleep(3000);
           continue;
@@ -3771,7 +3921,7 @@ const DOC_STEP = `(function(){
         log('这一章没有可播的内容。' + (s.platformDone ? '平台已标记完成。' : ''));
       }
       /* 【收口闸门 4/5】还有视频/文档类任务点没完成 ⇒ 先不翻页（同一章最多 6 轮）*/
-      if (NEXT && await holdForPendingMedia(s, '没有可播内容')) continue;
+      if (NEXT && await holdForPendingMedia(s, '没有可播内容')) { await openFirstPendingVideoCard(); continue; }
       if (NEXT) { await advance('本节没有可播的内容。'); if (advanceDead) break; }
       else await sleep(2000);
       continue;
@@ -3915,7 +4065,7 @@ const DOC_STEP = `(function(){
       /* 同一章可能还有文档任务，接着把文档滚完（跟"测验填完了"那条路共用同一段） */
       if (await scrollDocThenContinue()) continue;
       /* 【收口闸门 5/5】还有视频/文档类任务点没完成 ⇒ 先不翻页（同一章最多 6 轮）*/
-      if (NEXT && await holdForPendingMedia(s, '本节已完成')) continue;
+      if (NEXT && await holdForPendingMedia(s, '本节已完成')) { await openFirstPendingVideoCard(); continue; }
       if (NEXT) { await advance('本节已完成。'); if (advanceDead) break; continue; }
       await sleep(2000);
       continue;
