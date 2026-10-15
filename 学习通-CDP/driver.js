@@ -60,6 +60,24 @@ const secArg = process.argv.find((a) => a.startsWith('--seconds='));
 const MAX_SECONDS = secArg ? Number(secArg.split('=')[1]) : 0;
 const KEEP_MUTED = process.env.MUTE !== '0';
 
+/* ---- 播放倍速（--rate=auto|off|<数字>，默认 auto）----
+   auto  = 检测到播放器自带倍速档位 ⇒ 切到最高档（走 video.js 自己的 API）
+   off   = 完全不碰倍速
+   数字  = 固定到该倍速（如 --rate=1.5）
+   【2026-10-15 新增】依据来自 2026-10-14 实测：新版 video.js 播放器自带倍速控件
+   （档位 0.75/1/1.25/1.5/2），2x 一路播到底、平台照常盖完成戳 ——
+   旧结论"平台 1Hz 看门狗只接受 1x"是【旧播放器】的事，对新播放器不适用。
+   约束（2026-10-14 定）：走播放器自己的控件/API 设，不硬改元素属性。 */
+const rateArg = (process.argv.find((a) => a.startsWith('--rate=')) || '').split('=')[1];
+const RATE_TARGET = (() => {
+  if (rateArg === undefined || rateArg === '' || rateArg === 'auto') return 0; /* 0 = 自动取最高档 */
+  if (rateArg === 'off') return -1;                                           /* -1 = 不碰 */
+  const n = Number(rateArg);
+  return isFinite(n) && n > 0 ? n : 0;
+})();
+const RATE_OFF = RATE_TARGET === -1;
+const RATE_EVERY_MS = 5000; /* 校正节流：每 5 秒最多查一次，避免频繁的 CDP 往返 */
+
 /* ---- 伪心跳 60 倍速（--speed=N，默认 0 = 关）----
    为什么单独做一套开关，而不是直接改 playbackRate：
      平台的 1Hz 看门狗一发现 playbackRate !== 1 就 pause + 按回 1（见 原理说明.txt），
@@ -359,7 +377,8 @@ async function holdForPendingMedia(s, why, vp) {
    ============================================================================ */
 const CONTENT_BLIND_ALARM_MS = 20000;   /* 内容框持续读不到这么久 ⇒ 报警停手
                                            （翻页重载只短暂读不到、几秒就恢复 ✓） */
-const CARD_PULL_MAX_TRIES = 3;          /* 同一张卡连拉几次都没动 ⇒ 记待办、不再死磕 */
+const CARD_PULL_MAX_TRIES = 3;          /* 同一张卡连续几次没动 ⇒ 记待办、不再死磕 */
+const CARD_PULL_BLOCK_AT = 5;           /* 同一张卡（冷却窗口里）试满几次 ⇒ 晾它（2026-10-15 晚加：13:31 那次 150 连拉的病根） */
 
 /* ① 遍历 CDP Page.getFrameTree 的树，收集命中"验证页特征"的 frame URL。
    纯只读；树坏了（null/怪形状/URL 缺）也绝不抛错 ⇒ 返回命中数组（没命中就是 []）。 */
@@ -1544,15 +1563,17 @@ const INSTALL_AUTORESUME = `(function(){
   return { ok:true, hooked:!!v.__autoResume, quiz:hasVisibleQuiz(), count:(window.__autoResumeLog||[]).length };
 })()`;
 
-/* 让它播：倍速按回 1，再调 play()。返回后由调用方确认是否真的起来了 */
+/* 让它播，再调 play()。返回后由调用方确认是否真的起来了。
+   【2026-10-15 改动】这里原来有一句"把倍速按回 1"，依据是"平台只接受 1x"。
+   该依据已被 2026-10-14 实测推翻：新版 video.js 播放器自带倍速档位，2x 一路播到底、
+   平台照常盖完成戳。倍速现在统一交给 APPLY_RATE 按网页自带档位管理，这里不再插手
+   —— 否则每次续播都会把用户/驱动器刚设好的倍速按回去。 */
 const TRY_PLAY = `(function(){
   ${CHAIN}
   var R = chain();
   if (!R.v) return { ok:false, why:'no video' };
   var v = R.v;
   try { if (${KEEP_MUTED ? 'true' : 'false'}) v.muted = true; } catch(e){}
-  /* 保护：别的东西可能把倍速改过。平台只接受 1x，先按回去 */
-  try { if (v.playbackRate !== 1) v.playbackRate = 1; } catch(e){}
   /* 【为什么不能像对照脚本那样无条件 load()（2026-10-08 判断）】
      他是油猴脚本，调用点固定在"下一个任务点容器"里那个还没播的播放器，
      所以无条件 load() 对他安全。我们不一样：这里的 v 是 chain 选出来的，
@@ -1583,6 +1604,96 @@ const TRY_PLAY = `(function(){
     });
   } catch(e){ return { ok:false, why:e.name, didLoad:didLoad }; }
   return { ok:true, muted:v.muted, rate:v.playbackRate, didLoad:didLoad };
+})()`;
+
+/* 播放倍速校正：把播放器切到网页自带的最高倍速（或 --rate=N 指定的档位）。
+   【为什么走 video.js 的 API 而不是 v.playbackRate = N】
+   2026-10-14 定下的约束：要像人点播放器控件那样走它自己的通道。
+   video.js 的 player.playbackRate(r) 就是它控件内部调的那个方法，
+   而 v.playbackRate 是"硬改元素属性"。
+   【只在不一致时赋值】学对照脚本的防事件洪水写法：值相同就不碰，
+   免得每 5 秒往播放器里灌一次 ratechange。 */
+const APPLY_RATE = `(function(){
+  ${CHAIN}
+  var R = chain();
+  if (!R.v) return { ok:false, why:'no video' };
+  var v = R.v;
+  var want = ${RATE_TARGET};            /* 0 = 自动取最高档；>0 = 固定该值 */
+  var out = { ok:false, rates:null, top:null, cur:null, after:null, via:'', why:'' };
+  try {
+    var w = v.ownerDocument && v.ownerDocument.defaultView;
+    /* 【按"chain 选中的那个视频"找它的播放器】（2026-10-15 晚修）
+       原来直接取 getPlayers() 里的第一个 —— 多视频章里第一个往往不是当前在播的那个，
+       倍速就设到了别的播放器身上 = 白设（"没生效"的嫌疑之一 ✗）。 */
+    var playerFor = function (vv) {
+      try {
+        if (!w || !w.videojs) return null;
+        var root = null;
+        try { root = (vv.closest) ? vv.closest('.video-js') : null; } catch (e2) { root = null; }
+        if (typeof w.videojs.getPlayer === 'function') {
+          try { var p0 = w.videojs.getPlayer(root || vv); if (p0) return p0; } catch (e3) {}
+          try { if (vv.id) { var pi = w.videojs.getPlayer(vv.id); if (pi) return pi; } } catch (e4) {}
+        }
+        if (typeof w.videojs.getPlayers === 'function') {
+          var pls = w.videojs.getPlayers();
+          for (var id2 in pls) {
+            var p1 = pls[id2];
+            try { if (p1 && typeof p1.el === 'function' && p1.el() && (p1.el() === root || p1.el().contains(vv))) return p1; } catch (e5) {}
+          }
+          var ids = Object.keys(pls);                 /* 兜底：全页面只有一个播放器实例时才敢直接用它 */
+          if (ids.length === 1) return pls[ids[0]];
+        }
+      } catch (e6) {}
+      return null;
+    };
+    var p = playerFor(v);
+    if (!p) { out.why = (w && w.videojs) ? 'no player for this video' : 'no videojs global'; return out; }
+    try { if (typeof p.playbackRates === 'function') out.rates = p.playbackRates(); } catch (e1) { out.rates = null; }
+    if (!out.rates && p.options_ && Array.isArray(p.options_.playbackRates)) out.rates = p.options_.playbackRates;
+    if (!out.rates || !out.rates.length) { out.why = 'no rate list'; return out; }
+    var top = Number(out.rates[0]);
+    for (var k = 1; k < out.rates.length; k++) { if (Number(out.rates[k]) > top) top = Number(out.rates[k]); }
+    out.top = top;
+    var target = want > 0 ? want : top;
+    var cur = (typeof p.playbackRate === 'function') ? Number(p.playbackRate()) : Number(v.playbackRate);
+    out.cur = cur;
+    if (Math.abs(cur - target) > 1e-6) {
+      if (typeof p.playbackRate === 'function') { p.playbackRate(target); out.via = 'api'; }
+      else { v.playbackRate = target; out.via = 'element'; }
+    } else {
+      out.via = 'already';
+    }
+    out.ok = true;
+    out.after = Number(v.playbackRate);
+    /* 【常驻守卫】（借鉴 Firefox 倍速插件的做法：不能指望平台永远不碰倍速 ——
+       插件是"事件驱动"的：ratechange 一发现被改小，立刻设回去 ✓。我们同样只走播放器 API。
+       只修"被改小"不修"被改大"；同一视频每秒最多补 1 次、累计 30 次封顶（防和平台打架）。 */
+    try {
+      v.__dshRateWant = target;
+      v.__dshRateRestores = v.__dshRateRestores || 0;
+      if (!v.__dshRateKeeper) {
+        v.__dshRateKeeper = true;
+        v.addEventListener('ratechange', function () {
+          try {
+            var want2 = Number(v.__dshRateWant || 0);
+            if (!(want2 > 1)) return;
+            if (Number(v.playbackRate) >= want2 - 1e-6) return;
+            var now2 = Date.now();
+            if (now2 - (v.__dshRateLastFix || 0) < 1000) return;
+            if ((v.__dshRateRestores || 0) >= 30) return;
+            var p2 = playerFor(v);
+            if (p2 && typeof p2.playbackRate === 'function') {
+              v.__dshRateLastFix = now2;
+              v.__dshRateRestores = (v.__dshRateRestores || 0) + 1;
+              p2.playbackRate(want2);
+            }
+          } catch (e7) {}
+        });
+      }
+      out.keeper = v.__dshRateRestores || 0;
+    } catch (e8) {}
+  } catch (e) { out.why = String((e && e.message) || e); }
+  return out;
 })()`;
 
 /* 「下一节」按钮：滚进视口、量准坐标、命中测试，通过了才返回坐标 */
@@ -2378,6 +2489,9 @@ const DOC_STEP = `(function(){
   console.log('端口 ' + PORT +
               '   模式 ' + (RUN ? (NEXT ? (FORCE ? '驱动+翻节+跳过弹窗' : '驱动+翻节') : '驱动') : '只观察') +
               '   静音 ' + (KEEP_MUTED ? '是' : '否') + (MAX_SECONDS ? ('   限时 ' + MAX_SECONDS + 's') : '   不限时'));
+  console.log('倍速: ' + (RATE_OFF ? '关（完全不碰播放倍速）'
+              : (RATE_TARGET > 0 ? (RATE_TARGET + 'x 固定')
+              : '自动 —— 检测到网页自带倍速档位就切到它的最高档（走 video.js 自己的 API）')));
   if (HB_SPEED > 1) {
     console.log('伪心跳: ' + HB_SPEED + 'x 开   每 ' + Math.round(HB_TICK_MS / 1000) + ' 秒一条   最多 ' +
                 HB_MAX_TRIES_ARG + ' 条' + (HB_JUMP ? '   报满后推播放位置' : '') +
@@ -2855,10 +2969,19 @@ const DOC_STEP = `(function(){
        ① 先探一眼有没有视频在播且进度在涨 —— 有 ⇒ 这轮不拉新卡
           （同时播两个视频本来就不可能；等它播完再拉下一张 ✓）；
        ② 拉完没前进（<0.3s）⇒ 记一次"没拉动"；同一张卡连记 3 次 ⇒ 记一笔待办
-          （不死磕；翻页由收口闸门的轮次上限兜着走 ✓）。 */
+          （不死磕；翻页由收口闸门的轮次上限兜着走 ✓）；
+       ③ 【晾卡】（2026-10-15 晚加，真机证据：13:31~13:35 同一张卡被连拉 150+ 次、
+          一路把验证页猛出来 ✗）：同卡试满 CARD_PULL_BLOCK_AT 次 ⇒ 冷却期内**整段跳过**
+          （连探针都不发 ⇒ 页面零动作 ✓）；冷却 2→4→8→15 分钟封顶递增；
+          签名按 章|卡序|卡名 分桶 ⇒ 只晾坏卡，别的卡不受影响 ✓。 */
   let lastCardPullCur = -1;                    /* 上次看到"在播视频"的进度（判在不在涨） */
   let pullPlayingLogged = false;               /* "正在播不拉"那行日志只打一次（换章重置） */
   const cardPullFails = Object.create(null);   /* 卡名 → 连续"拉不动"次数 */
+  const cardPullTries = Object.create(null);        /* 当前冷却窗口里已试几次 */
+  const cardPullBlockLevel = Object.create(null);   /* 已晾过几轮（决定冷却时长） */
+  const cardPullBlockedUntil = Object.create(null); /* 晾到什么时候（ms 时间戳） */
+  const cardPullBlockedLogged = Object.create(null);/* "还在晾着"日志节流（每键每 60s 最多一行） */
+  let lastPullGk = '';                              /* 上一次真拉了哪张（整段跳过用它） */
 
   async function openFirstPendingVideoCard() {
     /* ① 有视频在播（且进度在涨）⇒ 不拉新卡（18:52 事故的正面修法） */
@@ -2870,6 +2993,15 @@ const DOC_STEP = `(function(){
       if (!pullPlayingLogged) {
         pullPlayingLogged = true;
         log('  ↳ 卡级枚举：有视频正在播（' + vp.cur + 's）⇒ 不拉新卡，等它播完再拉（不打断它、不猛拉）✓');
+      }
+      return false;
+    }
+    /* ③-b【晾卡保护】上一张还在晾着 ⇒ 本轮连探针都不发（页面零动作，防猛拉的第一道闸）✓ */
+    if (lastPullGk && (cardPullBlockedUntil[lastPullGk] || 0) > Date.now()) {
+      if (Date.now() - (cardPullBlockedLogged[lastPullGk] || 0) > 60000) {
+        cardPullBlockedLogged[lastPullGk] = Date.now();
+        log('  ↳ 卡级枚举：上一张卡还在"晾着"（再等 ' +
+            Math.ceil(((cardPullBlockedUntil[lastPullGk] || 0) - Date.now()) / 1000) + ' 秒），这一轮不碰它。');
       }
       return false;
     }
@@ -2894,6 +3026,7 @@ const DOC_STEP = `(function(){
     const cardName = String(r.name || ('第' + r.idx + '张'));   /* 给人看的 */
     const gk = cardPullKey(lastChapter, r.idx, r.name);          /* 记账的分桶签名：章|卡序|卡名 */
     const advanced = cardPullAdvanced((typeof r.cur === 'number' ? r.cur : -1), cur2);
+    cardPullTries[gk] = (cardPullTries[gk] || 0) + 1;   /* 本次尝试计入（决定什么时候"晾它"）✓ */
     if (advanced) {
       cardPullFails[gk] = 0;
     } else {
@@ -2907,6 +3040,18 @@ const DOC_STEP = `(function(){
         }
       }
     }
+    /* ③-c【试满就晾】：同卡试满 CARD_PULL_BLOCK_AT 次还没正常播起来 ⇒ 冷却期内彻底不碰 ✓
+       （今天 13:31 那次就是缺了这一道：试到 22 次还在每 2 秒拉一次，把验证页猛出来了 ✗） */
+    if (cardPullTries[gk] >= CARD_PULL_BLOCK_AT) {
+      const lv = (cardPullBlockLevel[gk] || 0) + 1;
+      cardPullBlockLevel[gk] = lv;
+      const coolMs = Math.min(120000 * Math.pow(2, lv - 1), 900000);
+      cardPullBlockedUntil[gk] = Date.now() + coolMs;
+      cardPullTries[gk] = 0;
+      log('  ↳ 「' + cardName + '」试了 ' + CARD_PULL_BLOCK_AT + ' 次还没正常播起来 ⇒ 先晾 ' +
+          Math.round(coolMs / 60000) + ' 分钟再碰它（防猛拉）✓');
+    }
+    lastPullGk = gk;
     log('  ↳ 卡级枚举：拉起了第 ' + r.idx + ' 张未完成的视频卡（共 ' + r.total + ' 张，已完成 ' + r.done +
         ' 张）' + (r.name ? ('「' + r.name + '」') : '') +
         '　播放中=' + (r.started || moved ? '是 ✓' : '否 ✗') +
@@ -3904,6 +4049,10 @@ const DOC_STEP = `(function(){
   let autoQuizSeen = -1;
   let quizSeen = '';
   let lastReport = 0;
+  let lastRateCheck = 0;   /* 倍速校正节流（2026-10-15） */
+  let rateChecked = false; /* 是否已报告过"倍速就是最高档" */
+  let rateWarned = false;  /* 是否已报告过"这个播放器调不了倍速" */
+  let keeperSeen = 0;      /* 常驻守卫已自动恢复的次数（涨幅才打日志） */
   let lastChapter = '';
   let lastCur = -1;
   let stuck = 0;
@@ -4086,6 +4235,7 @@ const DOC_STEP = `(function(){
       /* 风控提防：新章重新允许打印"正在播不拉"的提示（每章一次，防刷屏）；拉卡进度基准清零 */
       pullPlayingLogged = false;
       lastCardPullCur = -1;
+      lastPullGk = '';   /* 换章 ⇒ 整段跳过跟着复位（旧章的晾卡状态保留在各自分桶里）✓ */
       stuck = 0; lastCur = -1; docLastPct = ''; docStuck = 0;
       /* 换章了，'还有任务点没做完'的等待要重新计时 —— 
          以前这个计时器跨章保留，上一章把 40 秒用光后，
@@ -4662,6 +4812,28 @@ const DOC_STEP = `(function(){
     if (!announcedStart) {
       announcedStart = true;
       log('▶ 开始播放：' + (s.chapter || '') + '   总长 ' + hhmmss(v.dur) + '   倍速 ' + v.rate + '   静音 ' + v.muted);
+    }
+    /* 倍速校正（节流）：网页自带倍速档位的话切到最高档。
+       只在"正在播"时做 —— 暂停或换卡时设倍速没有意义，还可能干扰拉起流程。 */
+    if (!RATE_OFF && Date.now() - lastRateCheck > RATE_EVERY_MS) {
+      lastRateCheck = Date.now();
+      const rr = await ev(APPLY_RATE);
+      if (rr && rr.ok) {
+        if (rr.via === 'api' || rr.via === 'element') {
+          log('⏩ 倍速切到 ' + rr.after + 'x（网页档位 ' + JSON.stringify(rr.rates) + '，走 ' +
+              (rr.via === 'api' ? '播放器 API' : '元素属性') + '）');
+        } else if (!rateChecked) {
+          log('⏩ 倍速已是 ' + rr.after + 'x（此播放器最高档 ' + rr.top + 'x）');
+        }
+        rateChecked = true; rateWarned = false;
+        if ((rr.keeper || 0) > keeperSeen) {
+          keeperSeen = rr.keeper;
+          log('🔁 倍速被谁偷偷改小过 ' + keeperSeen + ' 次，常驻守卫已自动恢复（不跟它吵，直接设回去）✓');
+        }
+      } else if (!rateWarned) {
+        rateWarned = true;
+        log('⏩ 这个播放器调不了倍速（' + ((rr && rr.why) || '?') + '）—— 按原速走，不硬改元素属性');
+      }
     }
     if (Date.now() - lastReport > 4000) {
       lastReport = Date.now();

@@ -38,7 +38,8 @@ if (CODE) {
     CODE + '\n({ frameTreeSuspiciousUrls: frameTreeSuspiciousUrls, contentBlindStep: contentBlindStep,' +
     ' cardPullPlayingSkip: cardPullPlayingSkip, cardPullAdvanced: cardPullAdvanced,' +
     ' cardPullKey: cardPullKey,' +
-    ' CONTENT_BLIND_ALARM_MS: CONTENT_BLIND_ALARM_MS, CARD_PULL_MAX_TRIES: CARD_PULL_MAX_TRIES });',
+    ' CONTENT_BLIND_ALARM_MS: CONTENT_BLIND_ALARM_MS, CARD_PULL_MAX_TRIES: CARD_PULL_MAX_TRIES,' +
+    ' CARD_PULL_BLOCK_AT: CARD_PULL_BLOCK_AT });',
     {}
   );
 }
@@ -177,8 +178,9 @@ test('③b 成没成：前进 >0.3s 才算"拉起来了"；事故里 0s→0s / �
   assert.equal(A(5, 5), false);
   assert.equal(A(0, NaN), false);
 
-  /* 阈值由 CARD_PULL_MAX_TRIES 管：连拉 3 次没动才记待办（这里只核对常量为 3） */
+  /* 阈值由两个常量管：连拉 3 次没动才记待办；试满 5 次就"晾它"（这里核对常量） */
   assert.equal(api.CARD_PULL_MAX_TRIES, 3);
+  assert.equal(api.CARD_PULL_BLOCK_AT, 5);
 });
 
 test('③c 分桶签名：章+卡序+卡名 三要素成键（学 nuaa"签里带页号，多卡片天然分桶"）', () => {
@@ -224,14 +226,37 @@ test('④ 接线：driver.js 里三处都真的接上了（帧树 / 看门狗 / 
   assert.ok(body.includes('recordTodo('), '连拉 3 次没动必须记待办（不能只打日志）');
   assert.ok(body.includes('cardPullAdvanced('), '拉完必须用 cardPullAdvanced 记成没成');
   assert.ok(body.includes('cardPullKey(lastChapter, r.idx, r.name)'), '拉卡记账必须用分桶签名（章|卡序|卡名）');
+
+  /* 晾卡接线（2026-10-15 晚修：150 连拉事故）：跳过判定必须在真拉之前，页面零动作 */
+  const blockAt = body.indexOf('cardPullBlockedUntil[lastPullGk]');
+  assert.ok(blockAt >= 0, '"晾卡"必须能整段跳过（连探针都不发）');
+  assert.ok(blockAt < pullAt, '"晾卡"判定必须排在真拉之前（跳过 @' + blockAt + '，真拉 @' + pullAt + '）');
+  assert.ok(body.includes('cardPullTries[') && body.includes('CARD_PULL_BLOCK_AT'), '试满必须真的触发"晾它"');
+  assert.ok(body.includes('cardPullBlockedUntil[gk] = Date.now() + coolMs'), '"晾它"必须真的设冷却时间');
+  assert.ok(SRC.includes("lastPullGk = ''"), '换章必须复位 lastPullGk（不然新章会被旧章的晾卡误伤）');
+});
+
+/* ===========================================================================
+ * ⑥ 倍速：按"chain 选中的视频"找播放器 + 常驻守卫（借鉴 Firefox 倍速插件）
+ * ========================================================================*/
+
+test('⑥ 倍速接线：选对播放器、找不到不瞎设、被改小能设回且限速', () => {
+  assert.ok(SRC.includes('var playerFor = function (vv)'), '必须按 chain 选中的视频找它自己的播放器');
+  assert.ok(SRC.includes("'no player for this video'"), '找不到该视频的播放器要如实说（不许设到别人身上）');
+  assert.ok(SRC.includes("v.addEventListener('ratechange'"), '常驻守卫：被改小要能自动设回去（学插件的事件驱动）');
+  assert.ok(SRC.includes('v.__dshRateRestores'), '守卫要有计数（日志可查"被谁改小过几次"）');
+  assert.ok(SRC.includes('if (now2 - (v.__dshRateLastFix || 0) < 1000) return;'), '守卫必须限速（防和平台打架）');
+  assert.ok(SRC.includes("if (!RATE_OFF && Date.now() - lastRateCheck > RATE_EVERY_MS)"), '校正调用点必须还在');
+  assert.ok(!SRC.includes('if (v.playbackRate !== 1) v.playbackRate = 1;'), 'TRY_PLAY 里"按回 1x"的旧逻辑不许回来');
 });
 
 /* ===========================================================================
  * ⑤ 探针内联代码可编译（node --check 查不到模板字符串**内部**的语法错）
  * ========================================================================*/
 
-test('⑤ 探针可编译：PROBE / BLOCKED_CHECK / PLAY_PENDING_VIDEO / VIDEO_PROGRESS 内联代码语法完好', () => {
-  const CHAIN = '(void 0);';   /* PROBE 里 ${CHAIN} 的桩 */
+test('⑤ 探针可编译：PROBE / BLOCKED_CHECK / PLAY_PENDING_VIDEO / VIDEO_PROGRESS / APPLY_RATE 内联代码语法完好', () => {
+  const CHAIN = '(void 0);';   /* 探针里 ${CHAIN} 的桩 */
+  const RATE_TARGET = 0;       /* APPLY_RATE 里 ${RATE_TARGET} 的桩（0 = 自动取最高档） */
 
   const grab = (name) => {
     const at = SRC.indexOf('const ' + name + ' = `');
@@ -246,7 +271,7 @@ test('⑤ 探针可编译：PROBE / BLOCKED_CHECK / PLAY_PENDING_VIDEO / VIDEO_P
     return SRC.slice(from, end + 1);
   };
 
-  for (const name of ['PROBE', 'BLOCKED_CHECK', 'PLAY_PENDING_VIDEO', 'VIDEO_PROGRESS']) {
+  for (const name of ['PROBE', 'BLOCKED_CHECK', 'PLAY_PENDING_VIDEO', 'VIDEO_PROGRESS', 'APPLY_RATE']) {
     const lit = grab(name);
     let code = '';
     assert.doesNotThrow(() => { code = eval(lit); }, name + ' 模板展开失败');
