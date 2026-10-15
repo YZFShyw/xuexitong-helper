@@ -34,22 +34,26 @@ function load(opts) {
   const todos = [];
   const waits = [];
   const todoSet = new Set(opts.todoSet || []);
+  const sandbox = {
+    process: { argv: opts.argv || [] },
+    path: { join: (...a) => a.join('/') },
+    __dirname: 'C:/x',
+    fs: { existsSync: (p) => !!(opts.offFile && /收口关闭\.txt/.test(String(p))) },
+    log: (m) => logs.push(String(m)),
+    /* 【sleep 桩】holdForPendingMedia 现在是 async、轮次要隔 5 秒 ⇒
+       沙箱里必须有 sleep；这里做成"立即返回"并把等待时长记下来（waits ✓），
+       这样真值表既能瞬间跑完，又能断言"第 2 轮确实等了 ≈5 秒" ✓ */
+    sleep: (ms) => { waits.push(Number(ms) || 0); return Promise.resolve(); },
+    todoChapters: todoSet,
+    recordTodo: (ch, how) => todos.push([ch, how]),
+  };
+  /* 【假时钟】（2026-10-15 晚加）：容错窗口用例要控制"过了多少毫秒"；
+     只在用例显式给了 clock 时注入，其他用例保持运行时真 Date（行为与以前一致）✓ */
+  if (opts.clock) sandbox.Date = opts.clock;
   const api = vm.runInNewContext(
     CODE + '\n({ mediaHoldNeeded: mediaHoldNeeded, holdForPendingMedia: holdForPendingMedia,' +
            ' holdGateDisabled: holdGateDisabled, holdRounds: holdRounds });',
-    {
-      process: { argv: opts.argv || [] },
-      path: { join: (...a) => a.join('/') },
-      __dirname: 'C:/x',
-      fs: { existsSync: (p) => !!(opts.offFile && /收口关闭\.txt/.test(String(p))) },
-      log: (m) => logs.push(String(m)),
-      /* 【sleep 桩】holdForPendingMedia 现在是 async、轮次要隔 5 秒 ⇒
-         沙箱里必须有 sleep；这里做成"立即返回"并把等待时长记下来（waits ✓），
-         这样真值表既能瞬间跑完，又能断言"第 2 轮确实等了 ≈5 秒" ✓ */
-      sleep: (ms) => { waits.push(Number(ms) || 0); return Promise.resolve(); },
-      todoChapters: todoSet,
-      recordTodo: (ch, how) => todos.push([ch, how]),
-    }
+    sandbox
   );
   return { api, logs, todos, todoSet, waits };
 }
@@ -189,6 +193,50 @@ console.log('== 三、接线：5 个内容型出口有闸门 / 强制推进出�
   const zpBefore = zpAt < 0 ? 'X' : SRC.slice(Math.max(0, zpAt - 400), zpAt);
   check('强制推进出口：闸门区内无 holdForPendingMedia（保持原样，最后的保险）', false,
     /holdForPendingMedia/.test(zpBefore));
+}
+
+console.log('');
+console.log('== 四、"在播"判定的容错窗口（2026-10-15 晚修：单次采样毛刺不算停）==');
+{
+  const clock = { t: 1000000 };
+  const { api, logs } = load({ clock: { now: () => clock.t } });
+  const s = sit({ taskStats: stats({ pending: 1, pendingNames: ['视频'] }) });
+  const rounds = () => api.holdRounds['章A'] || 0;
+
+  /* 首次看到在播：拦下、不记轮 */
+  const r1 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 100, dur: 700 });
+  check('在播(首次)：拦下(true)、不消耗轮次', true, r1 === true && rounds() === 0);
+
+  /* ★ 采样毛刺：读数持平 —— 旧版当场误判"没在动"并消费 1 轮；新版窗口内容忍 */
+  clock.t += 2000;
+  const r2 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 100, dur: 700 });
+  check('在播(毛刺:读数持平)：仍拦下、轮次不动（旧版会误消费 ✗）', true, r2 === true && rounds() === 0);
+  has('毛刺有日志可查（说"没涨"就有证据）', '采样毛刺：视频读数没涨（100s→100s）', logs.join('\n'));
+
+  /* 毛刺后恢复前进：继续拦 */
+  clock.t += 2000;
+  const r3 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 108, dur: 700 });
+  check('在播(毛刺后恢复前进)：继续拦下、轮次不动', true, r3 === true && rounds() === 0);
+
+  /* 真卡住：超窗（>20 秒没涨）⇒ 落回轮次计数 */
+  clock.t += 25000;
+  const r4 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 108, dur: 700 });
+  check('卡住超窗(>20s 没涨)：落回轮次计数（第 1/3 轮）', true, r4 === true && rounds() === 1);
+
+  /* 恢复前进 ⇒ 回到"不消耗轮次" */
+  clock.t += 1000;
+  const r5 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 200, dur: 700 });
+  check('恢复前进：又回到"不消耗轮次"', true, r5 === true && rounds() === 1);
+
+  /* 明显回退（换卡/平台回拉）⇒ 当新基线，不误消费 */
+  clock.t += 1000;
+  const r6 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 100, dur: 700 });
+  check('读数明显回退(200→100)：当新基线，不落回轮次', true, r6 === true && rounds() === 1);
+
+  /* 没有在播的视频 ⇒ 照旧落回轮次计数 */
+  clock.t += 1000;
+  const r7 = await api.holdForPendingMedia(s, '真值表用', { playing: 0, cur: 100, dur: 700 });
+  check('没有在播(playing=0)：照旧落回轮次计数（第 2/3 轮）', true, r7 === true && rounds() === 2);
 }
 
 console.log('');

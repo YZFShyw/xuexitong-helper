@@ -233,6 +233,14 @@ const HOLD_MIN_GAP_MS = 5000;                /* 两轮之间最少隔 5 秒
                                                  ⇒ 6 轮约 30 秒，既不空转也不干等 ✓） */
 const holdLastAt = Object.create(null);      /* 每章上一次拦截的时刻 */
 const holdPlayingLogged = Object.create(null); /* "视频正在播，不记轮"那行日志每章只打一次 */
+/* 【"在播"判定的容错窗口】（2026-10-15 晚修，真机证据驱动）
+   实测（10-15 的 3.4/4.4 章）：视频明明在 1x 前进，但个别采样点读数持平
+   （缓冲抖动/读数毛刺）⇒ 旧判据"严格比上一次大一丁点"当场判"没在动" ⇒ 误消费轮次 ⇒
+   多视频章被提前拦满 3 轮翻页、视频被丢下 ✗（两章都这么丢的，卡级枚举侧同样受害）。
+   现在：读数没涨不立刻判停 —— 只要窗口内前进过就继续算"在播"✓；
+   真卡住超过窗口 ⇒ 才落回轮次计数（防死锁照旧 ✓）。
+   窗口内"没涨"的那一下打一行日志（每章一次），下次真机就能看到毛刺长什么样。 */
+const PLAYING_STALL_TOLERANCE_MS = 20000;
 /* 【视频正在播 ⇒ 不消耗轮次】（2026-10-13 真机发现）
    实测：卡级枚举把第 2 个视频拉起来后（进度 6.7s → 11.7s 在走 ✓），
    3 轮 15 秒一到就翻页 ⇒ **刚播 12 秒就被丢下** ✗（那个视频 722 秒 ✗）。
@@ -264,6 +272,8 @@ const VIDEO_PROGRESS = `(function(){
   return { all: acc.all, playing: acc.playing, cur: acc.maxCur, dur: acc.maxDur };
 })()`;
 let lastVideoCur = -1;                       /* 上一次看到的进度（用来判断"在涨没涨"✓） */
+let lastAdvanceAt = 0;                       /* 上次"确实在涨"的时刻（容错窗口用） */
+const holdGlitchLogged = Object.create(null); /* "采样毛刺"日志每章只打一次 */
 /* 闸门本体：true = 已拦下（调用处 continue 回主循环）；false = 放行（照旧翻页）。
    why 只进日志，说清是哪个出口要翻页。
    ★ async（2026-10-13）：轮次要隔 5 秒 ⇒ 里面要 await sleep ⇒ 调用处必须 await ✓
@@ -276,12 +286,25 @@ async function holdForPendingMedia(s, why, vp) {
   if (!mediaHoldNeeded(s)) return false;
   const ch = (s && s.chapter) || '';
   const used = holdRounds[ch] || 0;
-  /* 【视频正在播 ⇒ 拦下但不记轮】（2026-10-13 真机：拉起来的第二个视频刚播 12 秒就被翻页丢掉 ✗）
-     判据：页面上有 video 既没暂停、currentTime 又在涨 ✓
-     ⇒ 让它安心播 ✓（不消耗 3 轮上限）；停了/没在涨 ⇒ 落回下面的正常计数 ✓（防死锁 ✓） */
+  /* 【视频正在播 ⇒ 拦下但不记轮】（2026-10-13 起；2026-10-15 晚加容错窗口）
+     判据：页面上有 video 既没暂停、并且**在行进**（窗口内前进过；单次采样毛刺不算停）。
+     ⇒ 让它安心播 ✓（不消耗 3 轮上限）；真的停了/卡住超窗 ⇒ 落回下面的正常计数 ✓（防死锁 ✓） */
   if (vp && typeof vp === 'object' && vp.playing > 0 && vp.cur > 0) {
-    const moving = (vp.cur > (lastVideoCur >= 0 ? lastVideoCur : vp.cur - 1));
-    lastVideoCur = vp.cur;
+    const prev = lastVideoCur;
+    if (prev < 0 || vp.cur > prev + 0.05) {
+      /* 确实在涨（首次看到也算） ⇒ 刷新容错窗口 */
+      lastAdvanceAt = Date.now();
+      lastVideoCur = vp.cur;
+    } else if (vp.cur < prev - 0.5) {
+      /* 明显回退（换卡/重载/平台回拉）⇒ 当新基线，窗口重新计 ✓ */
+      lastVideoCur = vp.cur;
+      lastAdvanceAt = Date.now();
+    } else if (!holdGlitchLogged[ch]) {
+      /* 持平/微抖：靠容错窗口兜住；这一下记一行日志（每章一次）—— 说"没涨"就必须真的有证据 */
+      holdGlitchLogged[ch] = true;
+      log('  ↳ 采样毛刺：视频读数没涨（' + prev + 's→' + vp.cur + 's）—— 容错窗口内继续等它 ✓');
+    }
+    const moving = (Date.now() - lastAdvanceAt) < PLAYING_STALL_TOLERANCE_MS;
     if (moving) {
       if (!holdPlayingLogged[ch]) {
         holdPlayingLogged[ch] = true;
@@ -292,6 +315,7 @@ async function holdForPendingMedia(s, why, vp) {
     }
   } else {
     lastVideoCur = -1;   /* 没有视频在播 ⇒ 复位，下一次重新判断 ✓ */
+    lastAdvanceAt = 0;   /* 容错窗口也复位 ✓ */
   }
   /* 【到上限：立刻放行，绝不在这一步 sleep】（顺序要紧：先判上限、再谈间隔 ✓）
      否则到上限之后每一次出口调用都会白睡 20 秒 ✗ */
