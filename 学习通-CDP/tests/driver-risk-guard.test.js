@@ -216,7 +216,7 @@ test('④ 接线：driver.js 里三处都真的接上了（帧树 / 看门狗 / 
   /* 顺序断言：拉卡函数里，"正在播就别拉"的判定必须排在真拉之前 */
   const fnAt = SRC.indexOf('async function openFirstPendingVideoCard()');
   assert.ok(fnAt > 0, 'openFirstPendingVideoCard 必须还在');
-  const body = SRC.slice(fnAt, fnAt + 3000);
+  const body = SRC.slice(fnAt, fnAt + 7000);   /* 函数被 2026-10-15 三次加长（拉卡闸门/晾卡/容错）后 ≈4.6k 字符 ⇒ 切片跟着放大 */
   const guardAt = body.indexOf('cardPullPlayingSkip(vp, lastCardPullCur)');
   const pullAt = body.indexOf('await ev(PLAY_PENDING_VIDEO)');
   assert.ok(guardAt >= 0, '拉卡前必须过"正在播"判定');
@@ -233,6 +233,7 @@ test('④ 接线：driver.js 里三处都真的接上了（帧树 / 看门狗 / 
   assert.ok(blockAt < pullAt, '"晾卡"判定必须排在真拉之前（跳过 @' + blockAt + '，真拉 @' + pullAt + '）');
   assert.ok(body.includes('cardPullTries[') && body.includes('CARD_PULL_BLOCK_AT'), '试满必须真的触发"晾它"');
   assert.ok(body.includes('cardPullBlockedUntil[gk] = Date.now() + coolMs'), '"晾它"必须真的设冷却时间');
+  assert.ok(body.includes('skipNow') && body.includes('cardPullOkAt'), '"在播就别拉"必须带 20 秒容错窗口（与收口同一口径）');
   assert.ok(SRC.includes("lastPullGk = ''"), '换章必须复位 lastPullGk（不然新章会被旧章的晾卡误伤）');
 });
 
@@ -246,7 +247,13 @@ test('⑥ 倍速接线：选对播放器、找不到不瞎设、被改小能设�
   assert.ok(SRC.includes("v.addEventListener('ratechange'"), '常驻守卫：被改小要能自动设回去（学插件的事件驱动）');
   assert.ok(SRC.includes('v.__dshRateRestores'), '守卫要有计数（日志可查"被谁改小过几次"）');
   assert.ok(SRC.includes('if (now2 - (v.__dshRateLastFix || 0) < 1000) return;'), '守卫必须限速（防和平台打架）');
-  assert.ok(SRC.includes("if (!RATE_OFF && Date.now() - lastRateCheck > RATE_EVERY_MS)"), '校正调用点必须还在');
+  assert.ok(SRC.includes('var installKeeper = function (target)'), '守卫必须统一安装（API/元素两条路共用）');
+  assert.ok(SRC.includes('（已走元素直设）'), '摸不到播放器实例 = 元素直设兜底（学 Firefox 插件）');
+  const rateAt = SRC.indexOf('if (v && !RATE_OFF && Date.now() - lastRateCheck > RATE_EVERY_MS)');
+  assert.ok(rateAt > 0, '校正调用点必须还在');
+  const vAt = SRC.indexOf('const v = s.video;');
+  assert.ok(vAt > 0 && rateAt > vAt && (rateAt - vAt) < 2400,
+    '校正必须紧跟在 const v = s.video; 的岔路口之前（老位置在"正在播"分支，done 章到不了 —— 真机实证）');
   assert.ok(!SRC.includes('if (v.playbackRate !== 1) v.playbackRate = 1;'), 'TRY_PLAY 里"按回 1x"的旧逻辑不许回来');
 });
 
