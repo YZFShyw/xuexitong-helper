@@ -41,7 +41,10 @@ function vecOf(seed) {
   return v;
 }
 
-test('cmap 解析：真字体里有多少码位就读出多少（老表 41、新卷子那支 34）', () => {
+test('cmap 解析：真字体里有多少码位就读出多少（老表 41、新卷子那支 34）',
+  /* 开发样本字体（平台快照）不在 git/分发包里 ⇒ 缺它就跳过、不算失败（2026-10-15 · Codex 报告引发的加固） */
+  { skip: fs.existsSync(path.join(ROOT, '_字体', 'font-01-font-cxsecret.ttf')) ? false : '开发样本字体不在（克隆/分发包里正常），跳过' },
+  () => {
   const oldBuf = fs.readFileSync(path.join(ROOT, '_字体', 'font-01-font-cxsecret.ttf'));
   const cps = FI.parseCmap(oldBuf);
   assert.equal(cps.length, 41, '老字体 cmap 应该是 41 个码位');

@@ -734,6 +734,7 @@ async function fetchWithTimeout(url, opts, over) {
     const ac = new AbortController();
     const timer = setTimeout(() => { try { ac.abort(); } catch (e) {} }, limit);
     attempts++;
+    let handedOff = false;   /* 【2026-10-15 晚五修 · Codex 报告】响应是否已"交出去"（超时归谁清） */
     try {
       const r = await fetch(url, Object.assign({}, opts, { signal: ac.signal }));
       if (r && typeof r === 'object') {
@@ -742,6 +743,21 @@ async function fetchWithTimeout(url, opts, over) {
           Object.defineProperty(r, '__apiRetried', { value: attempts - 1, enumerable: false });
         } catch (e) { /* 响应对象被冻结就算了，不影响主流程 */ }
       }
+      /* 【正文也必须受超时保护】（Codex 2026-10-15 实证：旧写法在"响应头到手"就把定时器清了
+         ⇒ 正文读取裸奔：服务器拖正文/慢速滴流时，流程会长时间挂着 ✗）。
+         现在：定时器一直护到正文读完 —— 把 json/text/arrayBuffer/blob 包一层，读完（或读炸）
+         才 clearTimeout ✓；响应对象不可改（极罕见）时退回旧行为，不拦主流程。 */
+      try {
+        const wrap = (m) => {
+          if (typeof r[m] !== 'function') return;
+          const orig = r[m].bind(r);
+          r[m] = async function () {
+            try { return await orig.apply(null, arguments); } finally { clearTimeout(timer); }
+          };
+        };
+        wrap('json'); wrap('text'); wrap('arrayBuffer'); wrap('blob');
+        handedOff = true;
+      } catch (e) { /* 包不上就退回旧行为（finally 里会立刻清） */ }
       return r;
     } catch (e) {
       const kind = classifyApiFailure(e);
@@ -769,7 +785,9 @@ async function fetchWithTimeout(url, opts, over) {
       }
       throw err;
     } finally {
-      clearTimeout(timer);
+      /* 【不再在"收到响应头"就清】（2026-10-15 晚五修）：只有"没把响应交出去"的路径才在这里清；
+         交出去的响应由包装过的 json/text/arrayBuffer 在正文读完时清 ✓ */
+      if (!handedOff) clearTimeout(timer);
     }
   }
   /* 不可达，仅为让 linter 安心 */

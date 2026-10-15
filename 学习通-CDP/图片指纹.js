@@ -208,11 +208,16 @@ async function fetchImageBytes(url, opts) {
   try {
     const ctl = new AbortController();
     const t = setTimeout(() => ctl.abort(), o.timeoutMs || 15000);
-    const r = await fetch(url, { signal: ctl.signal, headers: headers });
-    clearTimeout(t);
-    if (r.ok) {
-      const ab = await r.arrayBuffer();
-      if (ab && ab.byteLength) return { ok: true, bytes: Buffer.from(ab), via: 'node' };
+    try {
+      const r = await fetch(url, { signal: ctl.signal, headers: headers });
+      /* 【正文也要在超时里】（2026-10-15 晚五修 · 同 Codex 报告）：原来响应头到手就 clearTimeout，
+         正文（arrayBuffer）裸奔 —— 图服务器拖正文时这里会挂着不返回 ✗ */
+      if (r.ok) {
+        const ab = await r.arrayBuffer();
+        if (ab && ab.byteLength) return { ok: true, bytes: Buffer.from(ab), via: 'node' };
+      }
+    } finally {
+      clearTimeout(t);
     }
   } catch (e) { /* 落下去试页面 */ }
   if (typeof o.ev === 'function') {

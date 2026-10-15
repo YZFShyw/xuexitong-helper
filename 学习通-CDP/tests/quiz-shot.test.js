@@ -651,9 +651,17 @@ function shotSceneQuestions() {
     { type: '判断', stem: '库里有第二题', options: [{ letter: 'A', text: '对' }, { letter: 'B', text: '错' }], obf: true }
   ];
 }
-const FONT_B64 = fs.readFileSync(path.join(__dirname, '..', '_字体', 'font-01-font-cxsecret.ttf')).toString('base64');
+/* 【缺资产不许把整个文件带崩】（2026-10-15 · Codex 报告引发的加固）：font-01 是开发样本字体，
+   不在 git/分发包里 —— 原来顶层直接 readFileSync，克隆环境里 ENOENT 会把整个文件加载搞挂 ✗。
+   现在读不到就空着；用到它的两个用例在自己那里声明跳过 ✓ */
+const FONT_B64 = (() => {
+  try { return fs.readFileSync(path.join(__dirname, '..', '_字体', 'font-01-font-cxsecret.ttf')).toString('base64'); }
+  catch (e) { return ''; }
+})();
 
-test('截图路 + 库里全有：不截图、不抄录、不问模型，直接把库里的答案用掉', async () => {
+test('截图路 + 库里全有：不截图、不抄录、不问模型，直接把库里的答案用掉',
+  { skip: FONT_B64 ? false : '开发样本字体不在（克隆/分发包里正常），跳过' },
+  async () => {
   await withTmpCache(async ({ out }) => {
     const qs = shotSceneQuestions();
     const bankPath = bankFileFor(qs, ['B', '错']);
@@ -688,7 +696,9 @@ test('截图路 + 库里全有：不截图、不抄录、不问模型，直接�
   });
 });
 
-test('截图路 + 只命中一部分：库里有几道就先填掉，只把缺的那几道送进截图', async () => {
+test('截图路 + 只命中一部分：库里有几道就先填掉，只把缺的那几道送进截图',
+  { skip: FONT_B64 ? false : '开发样本字体不在（克隆/分发包里正常），跳过' },
+  async () => {
   await withTmpCache(async () => {
     const qs = shotSceneQuestions();
     const bankPath = bankFileFor([qs[0]], ['B']);       /* 只有第 1 道在库里 */

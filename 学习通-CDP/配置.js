@@ -114,7 +114,12 @@ if (has('--test')) {
   console.log('用 ' + e.from + ' 里的 key（' + mask(e.key) + '）向 ' + cfg.model + ' 发一次最小请求…');
   console.log('  网关：' + q.maskApiUrl(q.apiUrlOf(cfg)) + (q.apiUrlOf(cfg) === q.API_URL ? '（默认 DeepSeek）' : '（自定义）'));
   const t0 = Date.now();
+  /* 【头+正文一起护】（2026-10-15 晚五修 · 同 Codex 报告）：这条自检原来没有任何超时，
+     网关拖正文时会一直挂着。30 秒大限，超了就报出来（交互式命令，宁可快报也别干等）。 */
+  const acTest = new AbortController();
+  const tTest = setTimeout(() => { try { acTest.abort(); } catch (e) {} }, 30000);
   fetch(q.apiUrlOf(cfg), {
+    signal: acTest.signal,
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + e.key },
     body: JSON.stringify({
@@ -124,6 +129,7 @@ if (has('--test')) {
     })
   }).then(async (r) => {
     const txt = await r.text();
+    clearTimeout(tTest);
     const ms = Date.now() - t0;
     if (r.ok) {
       let reply = '';
@@ -149,6 +155,7 @@ if (has('--test')) {
     console.log('  原文: ' + txt.slice(0, 200));
     process.exit(1);
   }).catch((err) => {
+    clearTimeout(tTest);
     console.log('');
     console.log('  连不上: ' + (err && err.message));
     console.log('  原因链: ' + ((err && err.cause && err.cause.message) || '（没有更多信息）'));
