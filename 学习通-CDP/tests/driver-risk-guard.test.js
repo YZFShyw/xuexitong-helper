@@ -37,6 +37,7 @@ if (CODE) {
   api = vm.runInNewContext(
     CODE + '\n({ frameTreeSuspiciousUrls: frameTreeSuspiciousUrls, contentBlindStep: contentBlindStep,' +
     ' cardPullPlayingSkip: cardPullPlayingSkip, cardPullAdvanced: cardPullAdvanced,' +
+    ' cardPullKey: cardPullKey,' +
     ' CONTENT_BLIND_ALARM_MS: CONTENT_BLIND_ALARM_MS, CARD_PULL_MAX_TRIES: CARD_PULL_MAX_TRIES });',
     {}
   );
@@ -180,6 +181,22 @@ test('③b 成没成：前进 >0.3s 才算"拉起来了"；事故里 0s→0s / �
   assert.equal(api.CARD_PULL_MAX_TRIES, 3);
 });
 
+test('③c 分桶签名：章+卡序+卡名 三要素成键（学 nuaa"签里带页号，多卡片天然分桶"）', () => {
+  const K = api.cardPullKey;
+
+  /* 同三元组 ⇒ 同键（同一张卡才算同一个桶） */
+  assert.equal(K('5.4 相关资料', 2, '第3讲-宋友文01.mp4'), K('5.4 相关资料', 2, '第3讲-宋友文01.mp4'));
+
+  /* 三要素任一不同 ⇒ 不同键（换章/换卡序/换卡名都不混桶） */
+  assert.notEqual(K('5.4 相关资料', 2, 'a.mp4'), K('2.1 某章', 2, 'a.mp4'));
+  assert.notEqual(K('章A', 2, 'a.mp4'), K('章A', 3, 'a.mp4'));
+  assert.notEqual(K('章A', 2, 'a.mp4'), K('章A', 2, 'b.mp4'));
+
+  /* 空值不炸（读不到章节名/卡名时也要能记账） */
+  assert.equal(K(null, null, null), '||');
+  assert.equal(typeof K(undefined, undefined, undefined), 'string');
+});
+
 /* ===========================================================================
  * ④ 静态接线检查（防"只加了函数没接线"）
  * ========================================================================*/
@@ -206,6 +223,7 @@ test('④ 接线：driver.js 里三处都真的接上了（帧树 / 看门狗 / 
   /* 记账接线：连拉失败要能落进待办（recordTodo 真的在拉卡函数里） */
   assert.ok(body.includes('recordTodo('), '连拉 3 次没动必须记待办（不能只打日志）');
   assert.ok(body.includes('cardPullAdvanced('), '拉完必须用 cardPullAdvanced 记成没成');
+  assert.ok(body.includes('cardPullKey(lastChapter, r.idx, r.name)'), '拉卡记账必须用分桶签名（章|卡序|卡名）');
 });
 
 /* ===========================================================================

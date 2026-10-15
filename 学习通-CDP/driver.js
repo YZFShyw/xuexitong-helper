@@ -331,7 +331,7 @@ async function holdForPendingMedia(s, why, vp) {
    钻进内容 iframe），这里只放**无副作用的判定**，动作在主作用域里做：
      ① frameTreeSuspiciousUrls —— 从 CDP 帧树里找验证页 frame（JS 层读不到时的眼睛）
      ② contentBlindStep        —— 内容框"可读→读不到"看门狗的状态机一步
-     ③ cardPullPlayingSkip / cardPullAdvanced —— 拉卡前的"正在播就别拉"判定 + 成没成的判定
+     ③ cardPullPlayingSkip / cardPullAdvanced / cardPullKey —— 拉卡判定 + 成没成 + 分桶签名（学 nuaa：签里带页/卡）
    ============================================================================ */
 const CONTENT_BLIND_ALARM_MS = 20000;   /* 内容框持续读不到这么久 ⇒ 报警停手
                                            （翻页重载只短暂读不到、几秒就恢复 ✓） */
@@ -405,6 +405,17 @@ function cardPullAdvanced(rCur, cur2) {
   if (typeof cur2 !== 'number' || !isFinite(cur2) || cur2 < 0) return false;
   const base = (typeof rCur === 'number' && isFinite(rCur) && rCur >= 0) ? rCur : 0;
   return cur2 > base + 0.3;
+}
+
+/* ③c 拉卡记账的"分桶签名"（2026-10-15 二次复核补 —— 对齐 nuaa 逆向结论里那条：
+   他的签名 = p{页}_t{卡}_i{任务}_{url}，"签里带 tab_idx，多卡片天然分桶，
+   不会在同一个卡上每 2 秒猛拉一次"（本目录 _逆向结论-多视频机制.txt 第 70、128 行）。
+   我们的键同取三要素：章 + 第几张 + 卡名 ⇒ 换章/换卡天然分桶，
+   上一章的"拉不动"计数不会背到这一章来 ✓（此前只按卡名，学习只算学了一半）。 */
+function cardPullKey(chapter, idx, name) {
+  return String(chapter == null ? '' : chapter) + '|' +
+         String(idx == null ? '' : idx) + '|' +
+         String(name == null ? '' : name);
 }
 /* ---- 风控提防 END（离线真值表脚本从上面的"风控提防 · 纯函数区"抠到这里）---- */
 
@@ -2856,7 +2867,8 @@ const DOC_STEP = `(function(){
     const cur2 = (after && typeof after.cur === 'number') ? after.cur : -1;
     const moved = (cur2 > 0 && cur2 > (typeof r.cur === 'number' ? r.cur : -1));
     /* ② 成没成：前进 >0.3s 才算"拉起来了"（事故里 0s→0s 会被记成没拉动 ✓） */
-    const gk = String(r.name || ('第' + r.idx + '张'));
+    const cardName = String(r.name || ('第' + r.idx + '张'));   /* 给人看的 */
+    const gk = cardPullKey(lastChapter, r.idx, r.name);          /* 记账的分桶签名：章|卡序|卡名 */
     const advanced = cardPullAdvanced((typeof r.cur === 'number' ? r.cur : -1), cur2);
     if (advanced) {
       cardPullFails[gk] = 0;
@@ -2866,8 +2878,8 @@ const DOC_STEP = `(function(){
         const chk = lastChapter || '(读不到章节名)';
         if (!todoChapters.has(chk)) {
           todoChapters.add(chk);
-          recordTodo(chk, '卡级枚举：视频卡「' + gk + '」连拉 ' + CARD_PULL_MAX_TRIES + ' 次进度都没动');
-          log('  ↳ 「' + gk + '」连拉 ' + CARD_PULL_MAX_TRIES + ' 次都没动 ⇒ 已记进 待办-未完成任务点.txt');
+          recordTodo(chk, '卡级枚举：视频卡「' + cardName + '」连拉 ' + CARD_PULL_MAX_TRIES + ' 次进度都没动');
+          log('  ↳ 「' + cardName + '」连拉 ' + CARD_PULL_MAX_TRIES + ' 次都没动 ⇒ 已记进 待办-未完成任务点.txt');
         }
       }
     }
