@@ -325,6 +325,89 @@ async function holdForPendingMedia(s, why, vp) {
 }
 /* ---- 收口闸门 END（离线真值表脚本从 function onlyQuizLike 抠到这里）---- */
 
+/* ============================================================================
+   【风控提防 · 纯函数区】（2026-10-15 加；离线真值表脚本从"风控提防 · 纯函数区"抠到"END"）
+   三块判定全部来自 10-14 两起风控事故的真机日志（18:52 卡级枚举猛拉 / 23:48 验证页
+   钻进内容 iframe），这里只放**无副作用的判定**，动作在主作用域里做：
+     ① frameTreeSuspiciousUrls —— 从 CDP 帧树里找验证页 frame（JS 层读不到时的眼睛）
+     ② contentBlindStep        —— 内容框"可读→读不到"看门狗的状态机一步
+     ③ cardPullPlayingSkip / cardPullAdvanced —— 拉卡前的"正在播就别拉"判定 + 成没成的判定
+   ============================================================================ */
+const CONTENT_BLIND_ALARM_MS = 20000;   /* 内容框持续读不到这么久 ⇒ 报警停手
+                                           （翻页重载只短暂读不到、几秒就恢复 ✓） */
+const CARD_PULL_MAX_TRIES = 3;          /* 同一张卡连拉几次都没动 ⇒ 记待办、不再死磕 */
+
+/* ① 遍历 CDP Page.getFrameTree 的树，收集命中"验证页特征"的 frame URL。
+   纯只读；树坏了（null/怪形状/URL 缺）也绝不抛错 ⇒ 返回命中数组（没命中就是 []）。 */
+function frameTreeSuspiciousUrls(tree) {
+  const hits = [];
+  (function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    const frame = node.frame;
+    if (frame && typeof frame === 'object') {
+      const u = String(frame.url == null ? '' : frame.url);
+      if (u.indexOf('antispider') >= 0 || u.indexOf('processVerify') >= 0) hits.push(u);
+    }
+    const kids = node.childFrames;
+    if (Array.isArray(kids)) {
+      for (let i = 0; i < kids.length; i++) walk(kids[i]);
+    }
+  })(tree);
+  return hits;
+}
+
+/* ② 内容框看门狗一步。st = { since:0, alarmed:false }（调用方持有并回写）；
+   s0 = PROBE 的返回；now = Date.now()（注入以便离线验算，不碰时钟）。
+   返回 { kind: 'ok'|'counting'|'alarm'|'alarmed'|'recovered', ms }：
+     ok        —— 这轮读得到（且之前也没在计时）
+     counting  —— 读不到，正在计时（ms = 已持续毫秒）
+     alarm     —— 持续到点（只报一次）
+     alarmed   —— 已经报过（调用方那时就该停了）
+     recovered —— 之前计时中、这轮又能读了（ms = 刚才那次持续了多久）
+   判据（有意保守）：ready 完整，且【直接读 #iframe 自己的文档读不到】（iframeRd
+   === 'unreadable'，验证页/跨域替换的形态），或 chain 整个下钻失败（d1Tasks === -1，
+   兜底）—— 翻页重载只会短暂读不到，持续到点基本就是被换掉了。
+   ★ 走"改道"绕出来的 0 卡（iframeRd === 'empty'）不当异常：可能就是空章节，
+     不能拿它报警，否则误伤 ✓（本轮复核推演过 chain 改道这个坑）。 */
+function contentBlindStep(st, s0, now) {
+  const blind = !!(s0 && s0.ready === 'complete' &&
+    (s0.iframeRd === 'unreadable' || (s0.hasFrame === true && s0.d1Tasks === -1)));
+  if (!blind) {
+    const ms = st.since ? (now - st.since) : 0;
+    st.since = 0;
+    st.alarmed = false;
+    return { kind: ms > 0 ? 'recovered' : 'ok', ms: ms };
+  }
+  if (!st.since) { st.since = now; return { kind: 'counting', ms: 0 }; }
+  const ms = now - st.since;
+  if (!st.alarmed && ms >= CONTENT_BLIND_ALARM_MS) { st.alarmed = true; return { kind: 'alarm', ms: ms }; }
+  return { kind: st.alarmed ? 'alarmed' : 'counting', ms: ms };
+}
+
+/* ③a 拉卡前的判定：有视频在播（且进度在涨）⇒ 这轮跳过"拉新卡"。
+   真机证据（10-14 18:52:42~18:53:20）：视频 1 还在播时，调用方每 ~2 秒
+   openFirstPendingVideoCard() 一次、40 秒 20 次 load() 猛拉卡 2 ⇒
+   "拉起了第 2 张 + 自动续播 +1"刷屏 ⇒ 疑似风控诱因之一。
+   判据与收口闸门的"正在播"保持一致（同一个 lastCur 语义，独立存放）。
+   返回 { skip, lastCur }：lastCur 无条件更新（照那一处的写法），调用方回存。 */
+function cardPullPlayingSkip(vp, lastCur) {
+  if (!vp || typeof vp !== 'object' || !(vp.playing > 0) || !(vp.cur > 0)) {
+    return { skip: false, lastCur: -1 };
+  }
+  const moving = (vp.cur > (lastCur >= 0 ? lastCur : vp.cur - 1));
+  return { skip: moving, lastCur: vp.cur };
+}
+
+/* ③b 拉完一张卡后：进度有没有实质前进（前进 >0.3s 才算"拉起来了"）。
+   rCur = 拉之前的进度（-1 = 当时读不到）；cur2 = 拉完 1.8 秒后复探的进度。
+   事故里 r.cur=0、复探还是 0 ⇒ false ⇒ 计入"没拉动"次数 ⇒ 到 3 次记待办。 */
+function cardPullAdvanced(rCur, cur2) {
+  if (typeof cur2 !== 'number' || !isFinite(cur2) || cur2 < 0) return false;
+  const base = (typeof rCur === 'number' && isFinite(rCur) && rCur >= 0) ? rCur : 0;
+  return cur2 > base + 0.3;
+}
+/* ---- 风控提防 END（离线真值表脚本从上面的"风控提防 · 纯函数区"抠到这里）---- */
+
 /* ---------------- 只在运行期间阻止睡眠 ----------------
    用 Windows 的 SetThreadExecutionState，交给 保持唤醒.ps1 去持这个请求：
      * 只申请 ES_SYSTEM_REQUIRED（不睡眠）
@@ -1063,6 +1146,23 @@ const PROBE = `(function(){
   o.ready = document.readyState;
   o.hasFrame = !!document.getElementById('iframe');
   o.d1Tasks = R.d1 ? R.d1.querySelectorAll('.ans-attach-ct').length : -1;
+  /* 【内容框直接可读性】（2026-10-15 风控提防）：不绕 chain、不做"改道"——
+     直接读 #iframe 自己的文档：null = 读不到（验证页/跨域替换就是这形态，事故②）；
+     读到了但数不出任何卡片标记 ⇒ 'empty'（不当异常报，可能只是空章节 ✓）。
+     ★ 为什么必须"直接"读：chain 读不到 #iframe 时会改道到别的可读 iframe（如 ueditor），
+       那一层也是"数出 0 个卡片"，跟空章节一模一样 ⇒ 看门狗会被骗过 ✗（本轮复核推演发现）。 */
+  o.iframeRd = (function(){
+    var f = null;
+    try { f = document.getElementById('iframe'); } catch (e) {}
+    if (!f) return 'noframe';
+    var d = null;
+    try { d = f.contentDocument || (f.contentWindow && f.contentWindow.document); } catch (e) { d = null; }
+    if (!d) return 'unreadable';
+    try {
+      var n = d.querySelectorAll('.ans-attach-ct, .ans-job-icon, iframe').length;
+      return n > 0 ? 'ok' : 'empty';
+    } catch (e) { return 'unreadable'; }
+  })();
 
   /* 【学习步骤标签 —— 只读探测（2026-10-09，从对照脚本学来的）】
      学习通在课件区顶上有一排「学习步骤」页签，当前那一步的标题挂在 .prev_title：
@@ -2712,7 +2812,32 @@ const DOC_STEP = `(function(){
       return (r && typeof r === 'object') ? r : null;
     } catch (e) { return null; }
   }
+  /* 【风控提防 · 第③层：正在播就别拉 + 连拉失败记账】（2026-10-15 加，真机证据驱动）
+     事故证据（10-14 18:52:42 ~ 18:53:20，40 秒 20 次）：视频 1 还在播（723.6s/786s）时
+     走收口闸门的"正在播不记轮"路径 ⇒ 调用方每个主循环轮次都走到这里 ⇒ 每 ~2 秒
+     v.load() 一次同一张卡 ⇒ "拉起了第 2 张 + 自动续播 +1"刷屏 40 秒（像机器人 ✗）。
+     修法（判定都在顶层纯函数里，离线真值表验过）：
+       ① 先探一眼有没有视频在播且进度在涨 —— 有 ⇒ 这轮不拉新卡
+          （同时播两个视频本来就不可能；等它播完再拉下一张 ✓）；
+       ② 拉完没前进（<0.3s）⇒ 记一次"没拉动"；同一张卡连记 3 次 ⇒ 记一笔待办
+          （不死磕；翻页由收口闸门的轮次上限兜着走 ✓）。 */
+  let lastCardPullCur = -1;                    /* 上次看到"在播视频"的进度（判在不在涨） */
+  let pullPlayingLogged = false;               /* "正在播不拉"那行日志只打一次（换章重置） */
+  const cardPullFails = Object.create(null);   /* 卡名 → 连续"拉不动"次数 */
+
   async function openFirstPendingVideoCard() {
+    /* ① 有视频在播（且进度在涨）⇒ 不拉新卡（18:52 事故的正面修法） */
+    let vp = null;
+    try { vp = await ev(VIDEO_PROGRESS); } catch (e) { vp = null; }
+    const pv = cardPullPlayingSkip(vp, lastCardPullCur);
+    lastCardPullCur = pv.lastCur;
+    if (pv.skip) {
+      if (!pullPlayingLogged) {
+        pullPlayingLogged = true;
+        log('  ↳ 卡级枚举：有视频正在播（' + vp.cur + 's）⇒ 不拉新卡，等它播完再拉（不打断它、不猛拉）✓');
+      }
+      return false;
+    }
     let r = null;
     try { r = await ev(PLAY_PENDING_VIDEO); } catch (e) { r = null; }
     if (!r || typeof r !== 'object' || r.__err) {
@@ -2730,10 +2855,27 @@ const DOC_STEP = `(function(){
     try { after = await ev(PLAY_PENDING_VIDEO); } catch (e) { after = null; }
     const cur2 = (after && typeof after.cur === 'number') ? after.cur : -1;
     const moved = (cur2 > 0 && cur2 > (typeof r.cur === 'number' ? r.cur : -1));
+    /* ② 成没成：前进 >0.3s 才算"拉起来了"（事故里 0s→0s 会被记成没拉动 ✓） */
+    const gk = String(r.name || ('第' + r.idx + '张'));
+    const advanced = cardPullAdvanced((typeof r.cur === 'number' ? r.cur : -1), cur2);
+    if (advanced) {
+      cardPullFails[gk] = 0;
+    } else {
+      cardPullFails[gk] = (cardPullFails[gk] || 0) + 1;
+      if (cardPullFails[gk] >= CARD_PULL_MAX_TRIES) {
+        const chk = lastChapter || '(读不到章节名)';
+        if (!todoChapters.has(chk)) {
+          todoChapters.add(chk);
+          recordTodo(chk, '卡级枚举：视频卡「' + gk + '」连拉 ' + CARD_PULL_MAX_TRIES + ' 次进度都没动');
+          log('  ↳ 「' + gk + '」连拉 ' + CARD_PULL_MAX_TRIES + ' 次都没动 ⇒ 已记进 待办-未完成任务点.txt');
+        }
+      }
+    }
     log('  ↳ 卡级枚举：拉起了第 ' + r.idx + ' 张未完成的视频卡（共 ' + r.total + ' 张，已完成 ' + r.done +
         ' 张）' + (r.name ? ('「' + r.name + '」') : '') +
         '　播放中=' + (r.started || moved ? '是 ✓' : '否 ✗') +
-        '　进度 ' + (cur2 >= 0 ? (cur2 + 's') : '?') + (r.dur > 0 ? ('/' + r.dur + 's') : ''));
+        '　进度 ' + (cur2 >= 0 ? (cur2 + 's') : '?') + (r.dur > 0 ? ('/' + r.dur + 's') : '') +
+        (cardPullFails[gk] > 0 ? ('　（连续第 ' + cardPullFails[gk] + '/' + CARD_PULL_MAX_TRIES + ' 次没前进）') : ''));
     return true;
   }
 
@@ -3389,12 +3531,67 @@ const DOC_STEP = `(function(){
       return { ok: false, error: (e && e.message) || String(e) };
     }
   }
-  /* 【平台风控检测】命中 ⇒ 写停止标记 + 记日志（重复调用不重复刷屏） */
+  /* 【CDP 帧树巡检】（2026-10-15 风控提防 · 第①层）
+     事故（10-14 23:48 第二起）：验证页钻进内容 iframe，顶层 URL 不变、外观正常；
+     页面内 JS 读那个 iframe 时 contentDocument=null ⇒ 保险 B（BLOCKED_CHECK）看不见 ✗。
+     但 CDP 层的 Page.getFrameTree 不经过页面 JS，frame.url 直接可见（当时就是靠它
+     确认的 antispiderShowVerify.ac ✓）。做法：每 ~10 秒查一次帧树，命中 ⇒ 与页面
+     探针同样处理（写停止标记 + 停等人）。
+     ★ send 的回包是整条消息 {id,result,error} ⇒ 必须读 r.result.frameTree ✓（老坑）。 */
+  const FRAME_TREE_GAP_MS = 10000;
+  let lastFrameTreeAt = 0;
+  let frameTreeHitLogged = false;
+  async function scanFrameTreeForVerify() {
+    const now = Date.now();
+    if (now - lastFrameTreeAt < FRAME_TREE_GAP_MS) return false;
+    lastFrameTreeAt = now;
+    let tree = null;
+    try {
+      const r = await c.send('Page.getFrameTree', {});
+      tree = r && r.result && r.result.frameTree;
+    } catch (e) { tree = null; }
+    if (!tree) return false;   /* 连接出问题/拿不到树：当没命中，别炸（连接另有地方管） */
+    const hits = frameTreeSuspiciousUrls(tree);
+    if (!hits.length) return false;
+    if (frameTreeHitLogged) return true;
+    frameTreeHitLogged = true;
+    log('⚠ 平台风控：CDP 帧树里出现验证页 frame（页面内 JS 读不到它，帧树看得见）');
+    log('  命中帧：' + hits[0].slice(0, 140));
+    log('  驱动器停下：不再点任何东西，也不让外套自动重拉。');
+    const w = writeStopFlagText('平台要求验证码（帧树巡检命中 antispider/processVerify），待人工输入');
+    if (w.ok) log('  ↳ 已写 _内部\\停止标记.txt ✓ —— 在浏览器里输完验证码，点控制台「开始」就能接着跑。');
+    else log('  ⚠ 停止标记没写成（' + w.error + '）—— 请手动停止，别让外套自动重拉。');
+    return true;
+  }
+
+  /* 【内容框可读性看门狗】（2026-10-15 风控提防 · 第②层）
+     事故形态（10-14 18:53 第一起）：卡片页整个读不到之后（JS 层拿到 null），
+     驱动器"看不见内容"还会继续跑（判"没有可播内容"、点下一节）。
+     判据在上面的纯函数 contentBlindStep（离线真值表验过）：
+     顶层 #iframe 在、ready 完整，但卡片页文档连续 CONTENT_BLIND_ALARM_MS 读不到
+     ⇒ 报警：写停止标记 + 停（翻页重载只短暂读不到、几秒就回来，不会误伤）。 */
+  const contentBlindSt = { since: 0, alarmed: false };
+  function contentReadableWatch(s0) {
+    const cb = contentBlindStep(contentBlindSt, s0, Date.now());
+    if (cb.kind === 'recovered') log('（内容框又能读了：刚才读不到持续 ' + Math.round(cb.ms / 1000) + ' 秒，先当它没事）');
+    if (cb.kind !== 'alarm') return false;
+    log('⚠ 内容框连续 ' + Math.round(cb.ms / 1000) + ' 秒读不到（卡片页文档为 null）——');
+    log('  翻页重载只会短暂读不到，这么久基本可以断定是平台风控/页面被换掉了。');
+    log('  不再点任何东西，写停止标记等人看。');
+    const w = writeStopFlagText('内容框连续 ' + Math.round(cb.ms / 1000) + ' 秒读不到（疑似风控页替换），待人工看一眼');
+    if (w.ok) log('  ↳ 已写 _内部\\停止标记.txt ✓ —— 处理完点控制台「开始」接着跑。');
+    else log('  ⚠ 停止标记没写成（' + w.error + '）—— 请手动停止，别让它自动重拉。');
+    return true;
+  }
+
+  /* 【平台风控检测】命中 ⇒ 写停止标记 + 记日志（重复调用不重复刷屏）
+     2026-10-15 升级：页面探针没命中时，再用 CDP 帧树补查一层（10 秒节流）——
+     contentDocument=null 的验证页只有帧树看得见。 */
   let verifyBlockedLogged = false;
   async function verifyBlockedCheck() {
     let b = null;
     try { b = await ev(BLOCKED_CHECK); } catch (e) { b = null; }
-    if (!b || !b.hit) return false;
+    if (!b || !b.hit) return await scanFrameTreeForVerify();
     if (verifyBlockedLogged) return true;
     verifyBlockedLogged = true;
     log('⚠ 平台风控：页面出现验证码/操作异常' + (b.where === 'iframe' ? '（在内容框里）' : '') +
@@ -3741,6 +3938,12 @@ const DOC_STEP = `(function(){
        立刻停手（2026-10-14 事故：在看不见的坏页面上死点了一千多次 ⇒ 账号被风控 ✗）。 */
     if (await verifyBlockedCheck()) break;
 
+    /* 【内容框可读性看门狗】（风控提防第②层，2026-10-15 加）：
+       从"能读"变成"读不到"、持续到点 ⇒ 停并写停止标记。
+       （翻页重载只短暂读不到、几秒就回来；一直读不到 = 被换掉了，
+        再跑下去就是对着坏页面空点 ✗ —— 18:53 事故就是这么空转的。） */
+    if (contentReadableWatch(s)) break;
+
     /* 【零推进兜底】连续 90 秒没有任何"真进展"，就说明有分支在空转 ——
        这一类 bug 的症状都一样：进程活着、CPU 不动、日志不写，事后极难查
        （2026/9/26 22:42 那次卡了 5 分钟以上，根因就是某个 continue 不推进状态）。
@@ -3844,6 +4047,9 @@ const DOC_STEP = `(function(){
         if (cid && cid !== lastCourseId) { lastCourseId = cid; writeLastCourseId(cid); }
       } catch (e) {}
       announcedStart = false; announcedDone = false;
+      /* 风控提防：新章重新允许打印"正在播不拉"的提示（每章一次，防刷屏）；拉卡进度基准清零 */
+      pullPlayingLogged = false;
+      lastCardPullCur = -1;
       stuck = 0; lastCur = -1; docLastPct = ''; docStuck = 0;
       /* 换章了，'还有任务点没做完'的等待要重新计时 —— 
          以前这个计时器跨章保留，上一章把 40 秒用光后，
