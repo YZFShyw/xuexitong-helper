@@ -223,20 +223,54 @@ console.log('== 四、"在播"判定的容错窗口（2026-10-15 晚修：单次
   const r4 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 108, dur: 700 });
   check('卡住超窗(>20s 没涨)：落回轮次计数（第 1/3 轮）', true, r4 === true && rounds() === 1);
 
-  /* 恢复前进 ⇒ 回到"不消耗轮次" */
+  /* 恢复前进 ⇒ 回到"不消耗轮次"，且预算回血清零（2026-10-15 晚三修：轮数只量"连续卡顿"） */
   clock.t += 1000;
   const r5 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 200, dur: 700 });
-  check('恢复前进：又回到"不消耗轮次"', true, r5 === true && rounds() === 1);
+  check('恢复前进：又回到"不消耗轮次"且预算清零', true, r5 === true && rounds() === 0);
 
-  /* 明显回退（换卡/平台回拉）⇒ 当新基线，不误消费 */
+  /* 明显回退（换卡/平台回拉）⇒ 当新基线，不误消费（同样回血） */
   clock.t += 1000;
   const r6 = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 100, dur: 700 });
-  check('读数明显回退(200→100)：当新基线，不落回轮次', true, r6 === true && rounds() === 1);
+  check('读数明显回退(200→100)：当新基线，不落回轮次', true, r6 === true && rounds() === 0);
 
-  /* 没有在播的视频 ⇒ 照旧落回轮次计数 */
+  /* 没有在播的视频 ⇒ 照旧落回轮次计数（从第 1 轮重新起算） */
   clock.t += 1000;
   const r7 = await api.holdForPendingMedia(s, '真值表用', { playing: 0, cur: 100, dur: 700 });
-  check('没有在播(playing=0)：照旧落回轮次计数（第 2/3 轮）', true, r7 === true && rounds() === 2);
+  check('没有在播(playing=0)：照旧落回轮次计数（第 1/3 轮）', true, r7 === true && rounds() === 1);
+}
+
+console.log('');
+console.log('== 五、"预算回血"（2026-10-15 晚三修 · 8.4 案例：轮数只量"连续卡顿"）==');
+{
+  const clock = { t: 1000000 };
+  const { api, logs } = load({ clock: { now: () => clock.t } });
+  const s = sit({ taskStats: stats({ pending: 1, pendingNames: ['视频'] }) });
+  const R = () => api.holdRounds['章A'] || 0;
+
+  /* 先攒两轮（没有在播视频 —— 相当于换卡/起播的毛刺期） */
+  await api.holdForPendingMedia(s, '真值表用');
+  clock.t += 6000;
+  await api.holdForPendingMedia(s, '真值表用');
+  check('毛刺期攒了 2 轮', 2, R());
+
+  /* 视频开始播（且在涨）⇒ 拦下 + 预算清零 */
+  clock.t += 6000;
+  const rA = await api.holdForPendingMedia(s, '真值表用', { playing: 1, cur: 100, dur: 700 });
+  check('在播 ⇒ 拦下', true, rA === true);
+  check('在播 ⇒ 预算回血到 0（8.4 案例：每张卡播完都不该被前面毛刺吃掉预算）', 0, R());
+
+  /* 再卡：从第 1 轮重新起算（不是直接吃满上限） */
+  clock.t += 6000;
+  await api.holdForPendingMedia(s, '真值表用');
+  check('回血后再卡：从第 1/3 轮重新起算', 1, R());
+
+  /* 回血后连卡 3 轮，照样到上限（防死锁不被削弱） */
+  clock.t += 6000; await api.holdForPendingMedia(s, '真值表用');
+  clock.t += 6000; await api.holdForPendingMedia(s, '真值表用');
+  clock.t += 6000;
+  const rCap = await api.holdForPendingMedia(s, '真值表用');
+  check('回血后连卡 3 轮：照样到上限放行（防死锁还在）', true, rCap === false && R() === 3);
+  has('上限日志还在', '本章已拦满', logs.join('\n'));
 }
 
 console.log('');

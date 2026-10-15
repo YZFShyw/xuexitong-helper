@@ -329,6 +329,11 @@ async function holdForPendingMedia(s, why, vp) {
         log('  ↳ 收口：视频正在播（' + vp.cur + 's' + (vp.dur > 0 ? ('/' + vp.dur + 's') : '') +
             '）⇒ 不消耗轮次，让它播完 ✓');
       }
+      /* 【预算回血】（2026-10-15 晚三修 · 8.4 案例根治）：视频确实在涨 ⇒ 本章"拦页轮数"清零。
+         轮数从此只量"连续卡了多久"，不再被换卡/起播的瞬时毛刺吃掉 ——
+         8.4 就是 3 张卡各正常播完（每张 ~10 分钟 @2x），却被三次转换毛刺吃满 3 轮，
+         第 4 张卡没轮到就被翻页记待办 ✗。回血后：只要还在出进展，就永远不翻页 ✓ */
+      if (holdRounds[ch]) holdRounds[ch] = 0;
       return true;   /* 拦下，但不记轮、不 sleep ✓ */
     }
   } else {
@@ -4667,7 +4672,11 @@ const DOC_STEP = `(function(){
            ② 开头那句 platformDone 短路   —— 免得对已完成的章白滚一整篇长文档。 */
       if (!announcedDone) {
         announcedDone = true;
-        log('✅ 视频播完：' + hhmmss(v.cur) + ' / ' + hhmmss(v.dur) + (s.platformDone ? '（平台已把这一章标记完成）' : '') +
+        /* 【消息如实】（2026-10-15 晚三修）：platformDone 但视频离片尾还远时，不许再说"视频播完" ✗
+           —— 真机 18:02 出现过「✅ 视频播完：00:02 / 18:12（平台已把这一章标记完成）」，当场被抓包。 */
+        const _nearEnd = (v.ended || (v.dur > 0 && v.cur >= v.dur - 1.5));
+        log('✅ ' + (_nearEnd ? '视频播完' : '本节完成（平台标记，视频未到片尾）') +
+            '：' + hhmmss(v.cur) + ' / ' + hhmmss(v.dur) + (s.platformDone ? '（平台已把这一章标记完成）' : '') +
             (s.taskStats && s.taskStats.total ? ('   任务点 ' + s.taskStats.done + '/' + s.taskStats.total +
               (s.taskStats.pendingNames.length ? ('   还没做的：' + s.taskStats.pendingNames.join('、')) : '')) : '') +
             /* 平台自己的「学习步骤」标注：写 "2视频" 就是本节有两个视频 */
