@@ -1471,6 +1471,7 @@ const PROBE = `(function(){
   o.autoLog = (window.__autoResumeLog || []).slice(-40);
   o.autoOk = (window.__autoResumeLog || []).filter(function(x){ return x === 'ok'; }).length;
   o.autoQuiz = (window.__autoResumeLog || []).filter(function(x){ return x === 'quiz'; }).length;
+  o.autoStands = (window.__autoResumeLog || []).filter(function(x){ return x === 'standby'; }).length;
 
   /* 「还有任务点未完成」弹窗（作者的门禁条件也是这句话）
      【关键：必须验"弹窗真的显示着"，光有文字不算】
@@ -1554,18 +1555,42 @@ const INSTALL_AUTORESUME = `(function(){
 
   if (!v.__autoResume) {
     v.__autoResume = true;
+    /* 【保命限流 · 2026-10-16 晚七修】"抢播冷静期"：
+       真机事故（10-16 15:49）：平台把播放器按到 0s 后引发"暂停-抢播"战 ——
+       本钩子毫秒级秒回，2 次/秒连抢 20 秒（43 次）⇒ 机器人才有这种节奏 ✗。
+       现在：同一元素 60 秒内最多抢播 5 次；超了进 120 秒冷静期（不再抢播，
+       只记一条 'standby'）—— 抢播交回驱动器每轮的常规续播（≤1 次/轮）。
+       冷静期自动结束；换章/换卡是新元素 = 新计数 ✓。 */
+    v.__hb = { times: [], standbyUntil: 0 };
     v.addEventListener('pause', function(){
       try {
         if (v.ended) return;
+        var now = Date.now();
         window.__autoResumeLog = window.__autoResumeLog || [];
+        var hb = v.__hb;
+        if (now < hb.standbyUntil) return;
+        var recent = 0;
+        for (var i = hb.times.length - 1; i >= 0; i--) {
+          if (now - hb.times[i] < 60000) recent++; else break;
+        }
+        if (recent >= 5) {
+          hb.standbyUntil = now + 120000;
+          window.__autoResumeLog.push('standby');
+          return;
+        }
         if (hasVisibleQuiz()) { window.__autoResumeLog.push('quiz'); return; }
+        hb.times.push(now);
+        if (hb.times.length > 30) hb.times.shift();
         var p = v.play();
         if (p && p.catch) p.catch(function(){});
         window.__autoResumeLog.push('ok');
       } catch (e) {}
     });
   }
-  return { ok:true, hooked:!!v.__autoResume, quiz:hasVisibleQuiz(), count:(window.__autoResumeLog||[]).length };
+  var hbz = v.__hb || {};
+  return { ok:true, hooked:!!v.__autoResume, quiz:hasVisibleQuiz(),
+           count:(window.__autoResumeLog||[]).length,
+           standby: !!(hbz.standbyUntil && Date.now() < hbz.standbyUntil) };
 })()`;
 
 /* 让它播，再调 play()。返回后由调用方确认是否真的起来了。
@@ -4075,6 +4100,7 @@ const DOC_STEP = `(function(){
   let evFails = 0;
   let autoSeen = -1;
   let autoQuizSeen = -1;
+  let autoStandsSeen = -1;
   let quizSeen = '';
   let lastReport = 0;
   let lastRateCheck = 0;   /* 倍速校正节流（2026-10-15） */
@@ -4362,6 +4388,12 @@ const DOC_STEP = `(function(){
         log('⚠ 检测到弹题，页面内钩子拒绝自动续播（不替你把题跳过去）');
       }
       autoQuizSeen = s.autoQuiz;
+    }
+    if (typeof s.autoStands === 'number' && s.autoStands !== autoStandsSeen) {
+      if (autoStandsSeen >= 0 && s.autoStands > autoStandsSeen) {
+        log('⚡ 续播冷静期：抢播太密（60 秒内超 5 次）⇒ 停止抢播 2 分钟，交回常规续播（防"机器人"信号）');
+      }
+      autoStandsSeen = s.autoStands;
     }
 
     /* 弹窗（不是翻节过程中弹出来的） */

@@ -278,7 +278,7 @@ test('⑤ 探针可编译：PROBE / BLOCKED_CHECK / PLAY_PENDING_VIDEO / VIDEO_P
     return SRC.slice(from, end + 1);
   };
 
-  for (const name of ['PROBE', 'BLOCKED_CHECK', 'PLAY_PENDING_VIDEO', 'VIDEO_PROGRESS', 'APPLY_RATE']) {
+  for (const name of ['PROBE', 'BLOCKED_CHECK', 'PLAY_PENDING_VIDEO', 'VIDEO_PROGRESS', 'APPLY_RATE', 'INSTALL_AUTORESUME']) {
     const lit = grab(name);
     let code = '';
     assert.doesNotThrow(() => { code = eval(lit); }, name + ' 模板展开失败');
@@ -286,4 +286,26 @@ test('⑤ 探针可编译：PROBE / BLOCKED_CHECK / PLAY_PENDING_VIDEO / VIDEO_P
     assert.doesNotThrow(() => { new Function(code); },
       name + ' 的内联代码有语法错（node --check 查不到它，只有运行时才炸 —— 就是这道检查要拦的）');
   }
+});
+
+/* ===========================================================================
+ * ⑩ 续播钩子"保命限流"（2026-10-16 晚七修：43 次抢播战事故 ⇒ 冷静期）
+ * ========================================================================*/
+
+test('⑩ 续播限流：60 秒超 5 次进 120 秒冷静期；冷静期不抢播；接线到日志', () => {
+  const at = SRC.indexOf('const INSTALL_AUTORESUME');
+  assert.ok(at > 0, 'INSTALL_AUTORESUME 必须还在');
+  const hook = SRC.slice(at, at + 4200);
+  assert.ok(hook.includes('v.__hb = { times: [], standbyUntil: 0 }'), '必须挂限流状态（每元素一份）');
+  assert.ok(hook.includes('if (now < hb.standbyUntil) return;'), '冷静期内必须直接返回（不抢播、不记账）');
+  assert.ok(hook.includes('if (now - hb.times[i] < 60000) recent++; else break;'), '滚动 60 秒窗口计数');
+  assert.ok(hook.includes('if (recent >= 5) {'), '60 秒内第 6 次 ⇒ 进冷静期');
+  assert.ok(hook.includes('hb.standbyUntil = now + 120000;'), '冷静期=120 秒');
+  assert.ok(hook.includes("window.__autoResumeLog.push('standby')"), '进冷静期要留痕（driver 才能如实报）');
+  assert.ok(hook.includes("if (hasVisibleQuiz()) { window.__autoResumeLog.push('quiz'); return; }"), '弹题底线不许丢');
+  assert.ok(hook.includes('standby: !!(hbz.standbyUntil'), '返回值要带冷静期状态');
+
+  assert.ok(SRC.includes("o.autoStands = (window.__autoResumeLog || []).filter(function(x){ return x === 'standby'; }).length;"), '探针要把 standby 次数带出来');
+  assert.ok(SRC.includes('let autoStandsSeen = -1;'), 'driver 侧要有去重游标');
+  assert.ok(SRC.includes('⚡ 续播冷静期：抢播太密'), '进冷静期必须有一条诚实日志（防"悄悄变了节奏"）');
 });
