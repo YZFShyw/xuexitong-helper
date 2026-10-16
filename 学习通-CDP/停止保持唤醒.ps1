@@ -1,4 +1,4 @@
-# 随时手动解锁：双击运行或 `pwsh -File 停止保持唤醒.ps1`
+﻿# 随时手动解锁：双击运行或 `pwsh -File 停止保持唤醒.ps1`
 # 只杀挂着「保持唤醒.ps1」（不带 -Probe）的进程，不碰别的 pwsh 窗口。
 
 $hit = Get-CimInstance Win32_Process -Filter "Name='pwsh.exe' OR Name='powershell.exe'" |

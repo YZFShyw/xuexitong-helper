@@ -9,6 +9,20 @@ rem Falls back to whatever node is on PATH if it is not there.
 rem ------------------------------------------------------------
 set "NODEEXE=node"
 if exist "%~dp0..\node\node.exe" set "NODEEXE=%~dp0..\node\node.exe"
+rem 【2026-10-15 防止"一点就闪"】没 node 的话，下面一连串调用全会静默失败，
+rem 旧行为是闷头等 50 秒的端口超时（还看不懂为什么）；现在第一步就明说 + 停住等人看。
+"%NODEEXE%" -v >nul 2>&1
+if errorlevel 1 (
+  echo.
+  echo   [失败] 这台机器上没有找到 node —— 助手第一步就跑不起来。
+  echo.
+  echo   完整版（带 node）里应当有 学习通-CDP\node\node.exe 。
+  echo   如果你用的是精简版，请先装 Node.js（https://nodejs.org/zh-cn 的 LTS 版），
+  echo   装完关掉本窗口，重新双击 开始.cmd。
+  echo.
+  pause
+  exit /b 1
+)
 set "RTP=%~dp0..\runtime-processes.js"
 set "CDPPORT=9222"
 set "SANDBOX=%LOCALAPPDATA%\Microsoft\Edge\User"
