@@ -214,12 +214,13 @@ const CS_CMD_READER = [
 
 const PS_QUERY = [
   '$ErrorActionPreference="Continue"',
+  '$script:DshCmdErr = ""',
   "$srcPath = Join-Path $env:TEMP ('dsh-cmd-' + [guid]::NewGuid().ToString('N') + '.cs')",
   'try {',
   "  [System.IO.File]::WriteAllText($srcPath, $env:DSH_CMD_SRC, [System.Text.UTF8Encoding]::new($false))",
   '  Add-Type -Path $srcPath -ErrorAction Stop | Out-Null',
   '  $script:DshCmdOk = $true',
-  '} catch { $script:DshCmdOk = $false }',
+  '} catch { $script:DshCmdOk = $false; $script:DshCmdErr = ($_.Exception.Message | Out-String).Trim() }',
   'finally { try { Remove-Item -LiteralPath $srcPath -Force -ErrorAction SilentlyContinue } catch { } }',
   'function Dsh-Start([object]$p) {',
   '  try { if ($p.StartTime) { return $p.StartTime.ToUniversalTime().Ticks.ToString() } } catch { }',
@@ -230,7 +231,7 @@ const PS_QUERY = [
   '  $n = [string]$p.ProcessName',
   '  $exe = ""',
   '  try { $exe = [string]$p.Path } catch { }',
-  '  $cl = ""; $ppid = 0',
+  '  $cl = ""; $ppid = 0; $clErr = ""',
   '  # 只给"可能是我们那几个"读父进程/命令行：node（驱动器）、msedge（助手浏览器）、',
   '  # cmd/powershell/pwsh（外套与启动脚本）。全表都读会白等（实测能拖到 20 秒以上）。',
   '  if ($script:DshCmdOk -and ($n -imatch "^(node|msedge|cmd|powershell|pwsh)$")) {',
@@ -241,18 +242,19 @@ const PS_QUERY = [
   '        $ppid = [int]$info.Substring(0, $i2)',
   '        $cl = $info.Substring($i2 + 1)',
   '      }',
-  '    } catch { }',
+  "    } catch { $clErr = ('cmdline读取失败: ' + $_.Exception.Message) }",
   '  }',
   '  $rows += [pscustomobject]@{',
   '    pid     = [int]$p.Id',
   '    name    = [string]($n + ".exe")',
   '    exe     = $exe',
   '    cmdline = [string]$cl',
+  "    clErr   = [string]$clErr",
   '    ppid    = [int]$ppid',
   '    start   = (Dsh-Start $p)',
   '  }',
   '}',
-  'ConvertTo-Json -InputObject $rows -Compress -Depth 3',
+  'ConvertTo-Json -InputObject ([pscustomobject]@{ rows = $rows; cmdErr = [string]$script:DshCmdErr }) -Compress -Depth 4',
 ].join('\n');
 
 /* 【为什么不直接 spawnSync(..., {encoding:'utf8'})】
@@ -261,10 +263,33 @@ const PS_QUERY = [
  * 这里改成把 stdout/stderr 重定向到临时文件，对沙箱/杀软都友好，
  * 也不受管道缓冲区大小限制（几千行进程信息完全够）。 */
 function runCapture(exe, args, timeoutMs, extraEnv) {
+  /* 【候选临时目录 · 2026-10-17 修（对面机器事故）】原来 mkdtemp 失败就退回**同一个**
+     os.tmpdir()，而它要是被拒（安全软件/ACL），openSync 继续 EPERM，报错还看不出原因。
+     现在逐个试"建目录 + mkdtemp"，第一个写成功的才用：系统 TEMP → 用户目录私有临时区
+     → 程序目录旁的 .tmp（只作用于本进程及其子进程，不动系统设置）。
+     全都写不了 ⇒ 明确报错（带每个候选的失败原因），绝不静默。 */
   let dir = '';
-  try { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-proc-')); } catch (e) { dir = ''; }
-  const outFile = path.join(dir || os.tmpdir(), 'out-' + process.pid + '-' + Date.now() + '.txt');
-  const errFile = path.join(dir || os.tmpdir(), 'err-' + process.pid + '-' + Date.now() + '.txt');
+  const tmpErrs = [];
+  const candidates = [
+    os.tmpdir(),
+    path.join(os.homedir() || '.', '.dsh-proc-tmp'),
+    path.join(__dirname, '.tmp'),
+  ];
+  for (const c of candidates) {
+    try {
+      fs.mkdirSync(c, { recursive: true });
+      dir = fs.mkdtempSync(path.join(c, 'dsh-proc-'));
+      break;
+    } catch (e) {
+      tmpErrs.push(c + ': ' + ((e && e.message) || e));
+    }
+  }
+  if (!dir) {
+    return { ok: false, error: new Error('没有可写的临时目录：' + tmpErrs.join(' | ')),
+             status: null, timedOut: false, stdout: '', stderr: '', tmpErrs };
+  }
+  const outFile = path.join(dir, 'out-' + process.pid + '-' + Date.now() + '.txt');
+  const errFile = path.join(dir, 'err-' + process.pid + '-' + Date.now() + '.txt');
   let fo = null, fe = null;
   try {
     fo = fs.openSync(outFile, 'w');
@@ -320,13 +345,15 @@ function defaultKillPid(pid, force) {
 }
 
 /** 只读地列出本机进程；失败返回 {ok:false, reason, list:[]} */
-function listProcesses() {
+function listProcesses(timeoutMs) {
   if (process.platform !== 'win32') {
     return { ok: false, reason: '不是 Windows，读不到进程表', list: [] };
   }
-  const r = runPowershell(PS_QUERY, 60000, { DSH_CMD_SRC: CS_CMD_READER });
+  const budget = Math.max(1000, Math.min(60000, Number(timeoutMs) || 60000));
+  const r = runPowershell(PS_QUERY, budget, { DSH_CMD_SRC: CS_CMD_READER });
   if (!r || r.error) {
-    return { ok: false, reason: '进程查询失败：' + ((r && r.error && r.error.message) || '未知'), list: [] };
+    const tmpTail = (r && Array.isArray(r.tmpErrs) && r.tmpErrs.length) ? ('（临时目录：' + r.tmpErrs.join(' | ') + '）') : '';
+    return { ok: false, reason: '进程查询失败：' + ((r && r.error && r.error.message) || '未知') + tmpTail, list: [] };
   }
   const raw = String(r.stdout || '').trim();
   if (!raw) {
@@ -334,22 +361,36 @@ function listProcesses() {
   }
   let parsed;
   try { parsed = JSON.parse(raw); } catch (e) { return { ok: false, reason: '进程查询结果不是 JSON', list: [] }; }
-  const arr = Array.isArray(parsed) ? parsed : [parsed];
+  /* 新形态 { rows, cmdErr }（2026-10-17）；也兼容旧的纯数组形态。 */
+  let arr;
+  let cmdErr = '';
+  if (parsed && !Array.isArray(parsed) && Array.isArray(parsed.rows)) {
+    arr = parsed.rows;
+    cmdErr = String(parsed.cmdErr || '');
+  } else {
+    arr = Array.isArray(parsed) ? parsed : [parsed];
+  }
   const list = [];
+  let clReadFails = 0;
   for (const p of arr) {
     if (!p) continue;
     const pid = Number(p.pid);
     if (!Number.isInteger(pid) || pid <= 0) continue;
+    const clErr = String(p.clErr || '');
+    if (clErr) clReadFails++;
     list.push({
       pid,
       name: String(p.name || ''),
       exe: String(p.exe || ''),
       cmdline: String(p.cmdline || ''),
+      clErr,
       ppid: Number.isInteger(Number(p.ppid)) ? Number(p.ppid) : 0,
       start: normalizeStartTime(p.start),
     });
   }
-  return { ok: true, reason: '', list };
+  /* cmdErr = C# 读取器编译失败（⇒ 全表命令行都读不到）；clReadFails = 逐进程读取失败数。
+     两者都带出去，让上层能说清"读不到"，而不是假装"没有"。 */
+  return { ok: true, reason: '', list, cmdErr, clReadFails };
 }
 
 /* 测试钩子：只在测试里替换。生产代码永远走上面那条真实查询。 */
@@ -452,6 +493,16 @@ function verifyDriverProcess(lock, proc, expectScript) {
     };
   }
   const cmd0 = String(proc.cmdline || '');
+  /* 【2026-10-17 修 · 信息不足 ≠ 陈旧锁】PID、创建时间、映像名都对上了，
+     但命令行**读不到**（安全软件拦了原生读内存 / 读取器编译失败 / 权限受限）：
+     这时无法判断它是不是驱动器 —— 必须按"无法确认"交给上层 fail-closed，
+     绝不能当成"陈旧锁"把锁删了放第二个实例进来（那会变成两个驱动器一起跑）。 */
+  if (!cmd0.trim()) {
+    return { ok: false, unverifiable: true,
+      reason: 'PID ' + id.pid + ' 的 node 进程还在（创建时间也对得上），但它的命令行读不到' +
+              (proc.clErr ? '（' + String(proc.clErr) + '）' : '') +
+              ' —— 无法确认是不是驱动器（信息不足，不是陈旧锁）' };
+  }
   const parsed = parseWindowsCommandLine(cmd0);
   /* 命令行里必须有一个参数**正好是** driver.js 的完整路径。
      不接受"包含 driver.js 字样"：C:\x\driver.js.bak、C:\x\notdriver.js 都会命中，
@@ -606,6 +657,12 @@ function acquireDriverLock(baseDir, info) {
         if (v.ok) {
           return { ok: false, reason: '已经有一个驱动器在跑（PID ' + id.pid + '，创建于 ' + id.start + '）',
                    holder: { pid: id.pid, start: id.start, batch: id.batch } };
+        }
+        /* 【fail-closed · 2026-10-17】"无法确认"（进程还在、但命令行读不到）绝不删锁：
+           删了就可能两个驱动器同时跑（双份猛拉 = 风控放大器 ✗）。宁可不启动，等人处理。 */
+        if (v.unverifiable) {
+          return { ok: false, reason: '旧锁指向的进程还在，但无法确认它的身份：' + v.reason +
+                   ' —— 为避免两个驱动器同时跑，本次不启动。' };
         }
         /* 验证不过 = 陈旧锁。删掉再抢。删不动也不算致命：下面 rename 会顶上去，
            但一定要把原因写进日志（绝不能悄悄变成"两个实例一起跑"）。 */
@@ -850,7 +907,7 @@ async function recordOwnedEdge(opts) {
   const profileDir = o.profileDir;
   const port = o.port;
   if (!profileDir) return { ok: false, reason: '没有给 profileDir，无法确认身份' };
-  const res = queryProcesses();
+  const res = queryProcesses(o.timeoutMs);
   if (!res.ok) return { ok: false, reason: '查不到进程表：' + res.reason };
   const list = res.list;
   const found = o.pid
@@ -861,7 +918,13 @@ async function recordOwnedEdge(opts) {
         return c.ok ? { ok: true, proc: p, reason: '指定 PID 也对上' } : { ok: false, reason: c.reason };
       })()
     : pickOwnedEdge(list, profileDir, port);
-  if (!found.ok) return { ok: false, reason: '认不出助手 Edge 主进程，不记所有权：' + found.reason };
+  if (!found.ok) {
+    /* 【2026-10-17】把"为什么每个候选都被排除"的明细一起带出去（rejected）。
+       原来这里只留一句总结，"认不出 Edge"到了日志里就没法再往下查了 ✗。 */
+    return { ok: false,
+             reason: '认不出助手 Edge 主进程，不记所有权：' + found.reason,
+             rejected: (found && Array.isArray(found.rejected)) ? found.rejected : [] };
+  }
   const proc = found.proc;
   const start = normalizeStartTime(proc.start);
   if (!start) return { ok: false, reason: '读不到 msedge 的创建时间，无法防 PID 复用，不记所有权' };
@@ -1041,6 +1104,8 @@ async function launchOwnedEdge(opts) {
   const skippedLoopback = allUrls.filter((u) => isLoopback(u.trim())).map((u) => u.trim());
   for (const u of urls) args.push(u.trim());
   let child = null;
+  let spawnError = null;      /* spawn 的**异步** error 事件（EPERM/EACCES 从这里来，try/catch 抓不到） */
+  let exitedEarly = null;     /* 启动器进程早退（Chromium 常见：把活交给已存在的浏览器进程） */
   try {
     child = spawn(found.exe, args, {
       detached: true,
@@ -1058,32 +1123,54 @@ async function launchOwnedEdge(opts) {
          兜底仍在：_内部\开始.cmd 会在调试端口就绪之后调一次 显示助手窗口.ps1。 */
     });
     if (child && typeof child.unref === 'function') child.unref();
+    if (child) {
+      /* 【2026-10-17】不挂 error 监听的话，异步 spawn 错误会直接冒成未捕获异常；
+         挂上之后也要**记下来**（写进 _启动浏览器结果.json），不能静默。 */
+      child.once('error', (e) => { spawnError = e; });
+      child.once('exit', (code, signal) => { if (!spawnError) exitedEarly = { code, signal }; });
+    }
   } catch (e) {
     return { ok: false, reason: '启动 msedge 失败：' + ((e && e.message) || e) };
   }
-  /* 记所有权要等主进程起来并且命令行可读。最多等 ~24 秒（首启动较慢）。
+  /* 记所有权要等主进程起来并且命令行可读。
+     【2026-10-17 修】原来"24 次 × 每次查询最长 60 秒"⇒ 理论最坏 24 分钟；
+     现在整段共用 **40 秒总预算**，每次查询只用剩余时间（起不来就如实失败，别骗人）。
      注意：**不拿 spawn 返回的 pid 当依据** —— Chromium 的启动器可能自己退出、
      把活干交给一个已经存在的浏览器进程（那种时候返回的 PID 立刻就没了）。
      所以这里一律按"独立 profile + 端口"在整个进程表里找，找不找得到由证据说话。 */
+  const T0 = Date.now();
+  const DEADLINE = 40000;
   let last = '';
+  let lastRejected = [];
   for (let i = 0; i < 24; i++) {
+    if (spawnError) { last = (last ? last + '；' : '') + '启动进程报错：' + ((spawnError && spawnError.message) || spawnError); break; }
+    const spent = Date.now() - T0;
+    if (spent >= DEADLINE) { last = (last ? last + '；' : '') + '等待已到 ' + Math.round(DEADLINE / 1000) + ' 秒总上限'; break; }
     await sleepMs(i === 0 ? 1500 : 1000);
-    const rec = await recordOwnedEdge({ baseDir: dir, profileDir, port });
+    const rec = await recordOwnedEdge({ baseDir: dir, profileDir, port,
+      timeoutMs: Math.max(1500, Math.min(60000, DEADLINE - (Date.now() - T0))) });
     if (rec.ok) {
       return {
-        ok: true, pid: rec.pid, reason: rec.reason, launched: true,
+        ok: true, pid: rec.pid, reason: rec.reason, launched: true, ownerConfirmed: true,
         /* 被忽略的本地地址要如实带出去（调用方会写进 _启动浏览器结果.json）。
            实测教训：静默丢弃比丢错更糟 —— 用户会以为"写进清单了却没打开"，查不出为什么。 */
         ...(skippedLoopback.length ? { skippedLoopback, skippedWhy: '本地回环地址（服务不在就只会得到"拒绝连接"白页）' } : {}),
       };
     }
     last = rec.reason;
+    if (Array.isArray(rec.rejected) && rec.rejected.length) lastRejected = rec.rejected;
   }
   /* 浏览器起来了但认不出所有权：**照实说**，并且不要伪造凭证。
-     这种情况下"关浏览器"会拒绝执行（宁可不关，也不误关用户自己的窗口）。 */
-  return { ok: false, launched: true, pid: (child && child.pid) || 0,
+     这种情况下"关浏览器"会拒绝执行（宁可不关，也不误关用户自己的窗口）。
+     【2026-10-17】三态分开：spawned（进程起来了）/ launched（启动请求发出）/
+     ownerConfirmed（所有权确认）；异步错误与早退、被排除的候选都带出去。 */
+  return { ok: false, launched: !!child, spawned: !!child, ownerConfirmed: false,
+           pid: (child && child.pid) || 0,
+           ...(spawnError ? { spawnError: String((spawnError && spawnError.message) || spawnError) } : {}),
+           ...(exitedEarly ? { exitedEarly } : {}),
+           ...(lastRejected.length ? { rejected: lastRejected } : {}),
            ...(skippedLoopback.length ? { skippedLoopback, skippedWhy: '本地回环地址（服务不在就只会得到"拒绝连接"白页）' } : {}),
-           reason: '浏览器已经启动，但没能确认它的所有权（' + last + '）。' +
+           reason: '浏览器已经启动，但没能确认它的所有权（' + (last || '没等到进程信息') + '）。' +
                    '这意味着以后「关浏览器」会拒绝执行（宁可不关，也不误关你自己的 Edge）。' };
 }
 

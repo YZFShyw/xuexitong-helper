@@ -477,3 +477,45 @@ test('旧 运行中.pid：只有内容是自己写的才会被删', () => {
   assert.equal(rp.removeLegacyPidFileIfOwn(dir, 4321).ok, true);
   assert.equal(fs.existsSync(path.join(dir, rp.LEGACY_PID_FILE)), false);
 });
+
+/* ---------------- 2026-10-17 修：信息不足必须 fail-closed ---------------- */
+
+test('锁：旧锁的进程还在、但命令行读不到 → 拒绝启动（不许当陈旧锁删掉）', () => {
+  const dir = mkdir('lock-unverifiable');
+  writeLock(dir, driverLock());
+  withFakeWorld([proc({ pid: 4242, start: '1000', cmdline: '' })]);   /* 活着、创建时间对上、命令行读不到 */
+  const r = rp.acquireDriverLock(dir, { pid: 9999, start: '5000', driverScript: DRIVER_SCRIPT });
+  assert.equal(r.ok, false, '信息不足时不许抢锁');
+  assert.match(String(r.reason), /无法确认/, '原因必须说清是"无法确认"');
+  assert.ok(!r.holder, '也不能说成"已经有一个驱动器在跑"（那是另一种结论）');
+  assert.ok(fs.existsSync(path.join(dir, rp.LOCK_FILE)), '旧锁必须原样保留（删了就可能双开）');
+});
+
+test('锁：进程真的不在 → 照旧可以接管（陈旧锁路径没被误伤）', () => {
+  const dir = mkdir('lock-stale-ok');
+  writeLock(dir, driverLock());
+  withFakeWorld([]);
+  const r = rp.acquireDriverLock(dir, { pid: 9999, start: '5000', driverScript: DRIVER_SCRIPT });
+  assert.equal(r.ok, true, '进程不存在 = 陈旧锁，接管是正确行为');
+});
+
+test('判活：命令行读不到 → alive=false 且原因说清"读不到"（不是"不存在"）', () => {
+  const dir = mkdir('read-unverifiable');
+  writeLock(dir, driverLock());
+  withFakeWorld([proc({ pid: 4242, start: '1000', cmdline: '' })]);
+  const v = rp.readVerifiedDriver(dir, { driverScript: DRIVER_SCRIPT });
+  assert.equal(v.alive, false);
+  assert.equal(v.verified, false);
+  assert.match(String(v.reason), /命令行读不到|无法确认/);
+});
+
+test('源码接线：错误保真 / 三态 / 总截止 / 临时目录回退（防"只加了字段没接线"）', () => {
+  const SRC = fs.readFileSync(path.join(__dirname, '..', 'runtime-processes.js'), 'utf8');
+  assert.ok(SRC.includes('cmdErr'), '进程查询必须把 C# 编译错误带出来');
+  assert.ok(SRC.includes('clErr'), '逐进程命令行读取失败要留痕');
+  assert.ok(SRC.includes('unverifiable'), '"读不到"必须与"陈旧锁"分开（fail-closed）');
+  assert.ok(SRC.includes("if (!res.ok) return { ok: false, reason: '查不到进程表"), '查不到进程表时的守卫不许丢');
+  assert.ok(SRC.includes('ownerConfirmed'), '启动结果必须分三态（请求/进程/所有权）');
+  assert.ok(SRC.includes('DEADLINE'), '启动流程要有总截止时间');
+  assert.ok(SRC.includes("'.dsh-proc-tmp'"), '临时目录要有可写回退（不再回到刚失败的 TEMP）');
+});
