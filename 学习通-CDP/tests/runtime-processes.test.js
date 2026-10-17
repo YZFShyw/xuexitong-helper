@@ -518,4 +518,6 @@ test('源码接线：错误保真 / 三态 / 总截止 / 临时目录回退（�
   assert.ok(SRC.includes('ownerConfirmed'), '启动结果必须分三态（请求/进程/所有权）');
   assert.ok(SRC.includes('DEADLINE'), '启动流程要有总截止时间');
   assert.ok(SRC.includes("'.dsh-proc-tmp'"), '临时目录要有可写回退（不再回到刚失败的 TEMP）');
+  assert.ok(SRC.includes("f1 = fs.openSync(o, 'w')"), '建文件必须放进候选循环里试（mkdtemp 成功但建文件被拒时要换下一级）');
+  assert.ok(SRC.includes('readdirSync(d)'), '候选失败要清掉半成品目录（不留垃圾）');
 });

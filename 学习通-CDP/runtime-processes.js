@@ -263,12 +263,17 @@ const PS_QUERY = [
  * 这里改成把 stdout/stderr 重定向到临时文件，对沙箱/杀软都友好，
  * 也不受管道缓冲区大小限制（几千行进程信息完全够）。 */
 function runCapture(exe, args, timeoutMs, extraEnv) {
-  /* 【候选临时目录 · 2026-10-17 修（对面机器事故）】原来 mkdtemp 失败就退回**同一个**
-     os.tmpdir()，而它要是被拒（安全软件/ACL），openSync 继续 EPERM，报错还看不出原因。
-     现在逐个试"建目录 + mkdtemp"，第一个写成功的才用：系统 TEMP → 用户目录私有临时区
-     → 程序目录旁的 .tmp（只作用于本进程及其子进程，不动系统设置）。
-     全都写不了 ⇒ 明确报错（带每个候选的失败原因），绝不静默。 */
+  /* 【候选临时目录 · 2026-10-17 二修（对面复核指出的真缺口）】
+     一修只兜"建目录失败"：如果 mkdir/mkdtemp 成功、**建文件被拒**（卡巴典型行为：
+     放行建目录、拦 node.exe 创建文件），旧代码直接失败，不会去试第二三级候选 ✗。
+     现在每个候选都要"建目录 → 建目录下的真文件"两步都成功才算可用；任一步失败就记
+     原因、清掉半成品、换下一级。全失败才报错（报错带每个候选各自的失败原因与错误码）。
+     候选顺序：系统 TEMP → 用户目录私有临时区 → 程序目录旁 .tmp
+     （只作用于本进程及其子进程，不动系统设置）。 */
   let dir = '';
+  let outFile = '';
+  let errFile = '';
+  let fo = null, fe = null;
   const tmpErrs = [];
   const candidates = [
     os.tmpdir(),
@@ -276,24 +281,38 @@ function runCapture(exe, args, timeoutMs, extraEnv) {
     path.join(__dirname, '.tmp'),
   ];
   for (const c of candidates) {
+    let d = '';
+    let f1 = null, f2 = null;
+    let o = '', er = '';
     try {
       fs.mkdirSync(c, { recursive: true });
-      dir = fs.mkdtempSync(path.join(c, 'dsh-proc-'));
+      d = fs.mkdtempSync(path.join(c, 'dsh-proc-'));
+      o = path.join(d, 'out-' + process.pid + '-' + Date.now() + '.txt');
+      er = path.join(d, 'err-' + process.pid + '-' + Date.now() + '.txt');
+      f1 = fs.openSync(o, 'w');          /* ← 关键：真文件的创建在这里试 */
+      f2 = fs.openSync(er, 'w');
+      dir = d; outFile = o; errFile = er; fo = f1; fe = f2;
       break;
     } catch (e) {
-      tmpErrs.push(c + ': ' + ((e && e.message) || e));
+      const why = (e && e.code ? (e.code + ' ') : '') + ((e && e.message) || e);
+      tmpErrs.push(c + ': ' + why);
+      try { if (f1 !== null) fs.closeSync(f1); } catch (e2) {}
+      try { if (f2 !== null) fs.closeSync(f2); } catch (e2) {}
+      /* 清掉本级的半成品（尽力而为）：先删文件再删目录 */
+      try {
+        if (d) {
+          for (const f of fs.readdirSync(d)) { try { fs.unlinkSync(path.join(d, f)); } catch (e3) {} }
+          fs.rmdirSync(d);
+        }
+      } catch (e4) {}
+      dir = ''; outFile = ''; errFile = ''; fo = null; fe = null;
     }
   }
   if (!dir) {
     return { ok: false, error: new Error('没有可写的临时目录：' + tmpErrs.join(' | ')),
              status: null, timedOut: false, stdout: '', stderr: '', tmpErrs };
   }
-  const outFile = path.join(dir, 'out-' + process.pid + '-' + Date.now() + '.txt');
-  const errFile = path.join(dir, 'err-' + process.pid + '-' + Date.now() + '.txt');
-  let fo = null, fe = null;
   try {
-    fo = fs.openSync(outFile, 'w');
-    fe = fs.openSync(errFile, 'w');
     const env = Object.assign({}, process.env, extraEnv || {});
     const r = spawnSync(exe, args, {
       stdio: ['ignore', fo, fe],
