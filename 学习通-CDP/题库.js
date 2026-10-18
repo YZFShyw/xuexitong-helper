@@ -566,7 +566,16 @@ function serializeBank(bank) {
   rebuildDerived(bank);
   normalizeBankJudgments(bank);
   rebuildDerived(bank);          /* 归一可能合并候选 ⇒ 再算一次更稳（很便宜） */
-  return JSON.stringify(bank, null, 1);
+  /* 【只写库数据，不写派生索引 · 2026-10-18】alias/order/loose/prefix 都是"读进来能
+     现算"的东西，写进文件只会让库变大（实测 +35KB）——所以序列化走白名单。 */
+  const out = {
+    version: bank.version,
+    builtAt: bank.builtAt,
+    source: bank.source,
+    stats: bank.stats || {},
+    entries: bank.entries || {},
+  };
+  return JSON.stringify(out, null, 1);
 }
 
 /* 读回磁盘上的题库。读坏了当空库（**不当成命中**），与 parseAnswerCache 一个口径。 */
@@ -690,6 +699,20 @@ function fillAnswersByLoose(bank) {
   return rep;
 }
 
+/* 【惰性索引】bank.loose / bank.prefix 首次被读时才构建，构建结果缓存在闭包里。
+   enumerable:false —— JSON.stringify / Object.assign 不会把它带出去（序列化走白名单，双保险）。 */
+function lazyIndex(bankOut, name, build) {
+  let v = null;
+  Object.defineProperty(bankOut, name, {
+    configurable: true,
+    enumerable: false,
+    get() {
+      if (!v) v = build(bankOut.entries);
+      return v;
+    },
+  });
+}
+
 function parseBank(raw) {
   const empty = { version: BANK_VERSION, builtAt: '', source: '', stats: {}, entries: {} };
   const txt = String(raw == null ? '' : raw).replace(/^\uFEFF/, '').trim();
@@ -741,10 +764,11 @@ function parseBank(raw) {
     version: BANK_VERSION, builtAt: String(j.builtAt || ''), source: String(j.source || ''),
     stats: (j.stats && typeof j.stats === 'object') ? j.stats : {}, entries: out,
     alias: alias, order: order,
-    /* 宽松键索引（内存里现建，不落盘；旧库读进来立即生效） */
-    loose: buildLooseIndex(out),
-    prefix: buildPrefixIndex(out)
+    /* 宽松键 / 前缀键索引：**惰性构建**（首次用到才算，见 lazyIndex）。
+       只跑视频不答题的进程就完全不用为它们付哈希成本。 */
   };
+  lazyIndex(bankOut, 'loose', buildLooseIndex);
+  lazyIndex(bankOut, 'prefix', buildPrefixIndex);
   /* 【读进来就统一判断题口径】本地老条目里可能还是 `answer=B`（选项 A.对/B.错）——
      不归一的话，跟"别人码里的 错"一比就是**假冲突**（实测过）。见 normalizeBankJudgments。 */
   normalizeBankJudgments(bankOut);
