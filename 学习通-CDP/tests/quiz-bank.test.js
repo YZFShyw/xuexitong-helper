@@ -1391,3 +1391,104 @@ test('打包清单三处契约：题库.js 进清单、进 need 自检、题库.
     assert.match(src, /banned\s*=\s*\/[^\n]*题库\[[^\n]*\.json/, '题库\\ 子库目录里的 .json 也要被 banned 拦住');
     assert.match(src, /banned\s*=\s*\/[^\n]*_课程名\\\.json/, '_课程名.json 是用户的课程名单，也要拦住');
   });
+
+/* ============================================================================
+ * 宽松键兜底（2026-10-18）：库里和页面把同一道题写成两种形态时也能命中
+ * ==========================================================================*/
+
+function bankFromEntries(entriesObj) {
+  return QB.parseBank(JSON.stringify({
+    version: QB.BANK_VERSION, builtAt: '', source: '', stats: {}, entries: entriesObj,
+  }));
+}
+function mkOne(fp, stem, answer) {
+  return {
+    fp, type: '单选', stem,
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+    answer, picked: true, chapter: '', n: 1,
+  };
+}
+
+test('宽松键：库里是"1. 题干"、页面是"1,题干" → 兜底命中（viaLoose）', () => {
+  const k = 'a'.repeat(32);
+  const bank = bankFromEntries({ [k]: mkOne(k, '1. 下列选项中，不属于的是（）', 'A') });
+  const page = {
+    type: '单选', stem: '1,下列选项中，不属于的是（）',
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+  };
+  const h = QB.lookup(bank, '', '单选', page);
+  assert.ok(h, '宽松键应当命中');
+  assert.equal(h.viaLoose, true, '要标明是宽松键救回的');
+  assert.equal(h.answer, 'A');
+});
+
+test('宽松键撞多条（答案不同）→ 整组不用，绝不猜', () => {
+  const k1 = 'b'.repeat(32), k2 = 'c'.repeat(32);
+  const bank = bankFromEntries({
+    [k1]: mkOne(k1, '1. 下列选项中，不属于的是（）', 'A'),
+    [k2]: mkOne(k2, '1下列选项中不属于的是（）', 'B'),
+  });
+  const page = {
+    type: '单选', stem: '1,下列选项中，不属于的是（）',
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+  };
+  assert.equal(QB.lookup(bank, '', '单选', page), null, '撞多条必须不命中（宁可漏，不填错）');
+});
+
+
+/* ---------------- 宽松键补答案（B · 2026-10-18，不删条目、不动主键） ---------------- */
+
+test('宽松键补答案：同键一条有答案、一条没答案 → 补上并记溯源；主键不动', () => {
+  const k1 = 'd'.repeat(32), k2 = 'e'.repeat(32);
+  const bank = bankFromEntries({
+    [k1]: mkOne(k1, '1. 下列选项中，不属于的是（）', 'A'),
+    [k2]: Object.assign(mkOne(k2, '1下列选项中不属于的是（）', ''), { answer: '', answerText: '', picked: false }),
+  });
+  const rep = QB.fillAnswersByLoose(bank);
+  assert.equal(rep.filled, 1, '应补 1 条');
+  assert.equal(bank.entries[k2].answer, 'A', '缺答案的那条要补上');
+  assert.equal(bank.entries[k2].filledFrom, k1, '要记答案是从哪条补来的');
+  assert.equal(bank.entries[k1].answer, 'A', '原来那条不动');
+  assert.equal(bank.entries[k2].fp, k2, '主键不许改');
+});
+
+test('宽松键补答案：组内答案不一致 → 只标冲突、不补没答案的那条', () => {
+  const k1 = 'f'.repeat(32), k2 = '0'.repeat(32), k3 = '1'.repeat(32);
+  const bank = bankFromEntries({
+    [k1]: mkOne(k1, '1. 下列选项中，不属于的是（）', 'A'),
+    [k2]: mkOne(k2, '1下列选项中不属于的是（）', 'B'),
+    [k3]: Object.assign(mkOne(k3, '1、下列选项中，不属于的是（）', ''), { answer: '', answerText: '', picked: false }),
+  });
+  const rep = QB.fillAnswersByLoose(bank);
+  assert.ok(rep.conflicts >= 1, '有冲突要计数');
+  assert.equal(bank.entries[k3].answer, '', '有歧义的组，缺答案的那条保持空（宁缺毋滥）');
+  assert.equal(bank.entries[k1].conflict, true, '有答案的条目互标冲突');
+  assert.ok((bank.entries[k1].answers || []).some((a) => a.answer === 'B'), '另一份答案要进 answers 留档');
+});
+
+
+/* ---------------- 导出侧去重（C · 2026-10-18） ---------------- */
+
+test('导出Bank 去重：同一题的不同写法只带一份（别的题照常带）', () => {
+  const k1 = 'd'.repeat(32), k2 = 'e'.repeat(32), k3 = '3'.repeat(32);
+  const bank = bankFromEntries({
+    [k1]: mkOne(k1, '1. 下列选项中，不属于的是（）', 'A'),
+    [k2]: mkOne(k2, '1下列选项中不属于的是（）', 'B'),
+    [k3]: mkOne(k3, '另一道完全不同的题', 'C'),
+  });
+  const out = QB.exportBank(bank, { withUnverified: true });
+  assert.equal(Object.keys(out.entries).length, 2, '同宽松键的两条只带一份');
+  assert.equal(out.stats.deduped, 1, '去重计数要如实报');
+});
+
+test('题库码去重：同一题的不同写法只带一份', () => {
+  const k1 = 'd'.repeat(32), k2 = 'e'.repeat(32), k3 = '3'.repeat(32);
+  const bank = bankFromEntries({
+    [k1]: mkOne(k1, '1. 下列选项中，不属于的是（）', 'A'),
+    [k2]: mkOne(k2, '1下列选项中不属于的是（）', 'B'),
+    [k3]: mkOne(k3, '另一道完全不同的题', 'C'),
+  });
+  const ents = QB.keysOnlyEntries(bank, { withUnverified: true });
+  assert.equal(Object.keys(ents).length, 2, '题库码也只带一份');
+});
+

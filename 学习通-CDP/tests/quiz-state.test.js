@@ -281,3 +281,30 @@ test('用量按步累加，缺 usage 的那些只记"这次没有"，不猜数�
   assert.doesNotMatch(line, /费用|价格|元|美元|\$/);
   assert.match(QS.formatUsage(QS.emptyUsage()), /没有调用模型/);
 });
+
+/* ============================================================================
+ * 九、宽松键：同一道题的"不同抄写形态"（2026-10-18）
+ * ==========================================================================*/
+
+test('宽松键：分隔标点差异归一到同一把；结构符号/题型/选项文本仍要区分', () => {
+  const fpr = QS.makeFingerprinter({});
+  const base = {
+    type: '单选', stem: '1. 下列选项中，不属于的是（）',
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+  };
+  const comma = {
+    type: '单选', stem: '1,下列选项中不属于的是（）',
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+  };
+  assert.equal(fpr.looseOf(base), fpr.looseOf(comma), '逗号/空格/句点差异 → 同一把宽松键');
+
+  const halfParens = { type: '单选', stem: '1. 下列选项中，不属于的是()', options: base.options };
+  assert.notEqual(fpr.looseOf(base), fpr.looseOf(halfParens), '括号形态不同 → 不同键（结构符号必须保留）');
+
+  const multi = { type: '多选', stem: base.stem, options: base.options };
+  assert.notEqual(fpr.looseOf(base), fpr.looseOf(multi), '题型要进键（同一题干在单选/多选下答案不是一回事）');
+
+  const otherOpt = { type: '单选', stem: base.stem, options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '丙' }] };
+  assert.notEqual(fpr.looseOf(base), fpr.looseOf(otherOpt), '选项文本要进键');
+});
+

@@ -570,6 +570,108 @@ function serializeBank(bank) {
 }
 
 /* 读回磁盘上的题库。读坏了当空库（**不当成命中**），与 parseAnswerCache 一个口径。 */
+/* 【宽松键索引 · 2026-10-18】同一道题的**不同抄写形态**（题号后的逗号/空格、分隔标点差异）
+   在库里可能存成了不同指纹。宽松键把它们归到一组，查库时作为**最后一道**兜底。
+   只收录"唯一"的组：撞多条的组整组不进索引（宁可漏，不填错）。 */
+const LOOSE_FPR = QS.makeFingerprinter({});
+function buildLooseIndex(entries) {
+  const idx = {};
+  const dup = {};
+  for (const k of Object.keys(entries || {})) {
+    const e = entries[k];
+    if (!e) continue;
+    let lk = '';
+    try { lk = LOOSE_FPR.looseOf(e); } catch (err) { lk = ''; }
+    if (!lk) continue;
+    if (idx[lk] && idx[lk] !== k) { dup[lk] = true; continue; }
+    idx[lk] = k;
+  }
+  for (const lk of Object.keys(dup)) delete idx[lk];
+  return idx;
+}
+
+/* 【宽松键补答案 · 2026-10-18】同一题的不同写法在库里分成多条时：
+   · 有答案的 → 把答案补给**没答案**的那条（记 filledFrom，可溯源）；
+   · 都有答案但不同 → 互相补进 answers 并标 conflict（不替用户选）；
+   · 答案相同 → 只把 n（出现次数）取最大。
+   **不删条目、不动主键/别名**（旧程序与旧题库码的查询路径完全不变）。 */
+function looseGroups(entries) {
+  const groups = {};
+  for (const k of Object.keys(entries || {})) {
+    const e = entries[k];
+    if (!e) continue;
+    let lk = '';
+    try { lk = LOOSE_FPR.looseOf(e); } catch (err) { lk = ''; }
+    if (!lk) continue;
+    (groups[lk] = groups[lk] || []).push(k);
+  }
+  return groups;
+}
+
+function rankEntry(e) {
+  const official = (e.answers || []).some((a) => a.official) || e.official ? 1 : 0;
+  const picked = (e.answers || []).some((a) => a.picked) || e.picked ? 1 : 0;
+  const dom = (e.answers || []).some((a) => (a.srcs || []).some((s) => /^self:/.test(s))) ? 1 : 0;
+  return official * 1000 + picked * 100 + dom * 10 + Math.min(9, Number(e.n) || 1);
+}
+
+function fillAnswersByLoose(bank) {
+  const ent = (bank && bank.entries) || {};
+  const rep = { groups: 0, filled: 0, conflicts: 0, same: 0 };
+  const groups = looseGroups(ent);
+  for (const lk of Object.keys(groups)) {
+    const ks = groups[lk];
+    if (ks.length < 2) continue;
+    rep.groups++;
+    const withAns = ks.filter((k) => ent[k] && ent[k].answer);
+    const noAns = ks.filter((k) => ent[k] && !ent[k].answer);
+    if (!withAns.length) continue;
+    const keys = Array.from(new Set(withAns.map((k) => ent[k].answer)));
+    if (keys.length > 1) {
+      /* 组内答案不一致 → 只互相留档 + 标冲突；**不补**没答案的（宁缺毋滥） */
+      for (const k of withAns) {
+        const e = ent[k];
+        e.conflict = true;
+        e.answers = e.answers || [];
+        for (const j of withAns) {
+          if (j === k) continue;
+          const o = ent[j];
+          if (e.answers.some((a) => a.answer === o.answer)) continue;
+          if (e.answers.length >= 16) break;
+          e.answers.push({
+            answer: o.answer, answerText: o.answerText || '', why: o.why || '',
+            picked: !!o.picked, notPicked: '', srcs: ['loose:' + j.slice(0, 8)], at: '', n: 1,
+          });
+        }
+      }
+      rep.conflicts++;
+      continue;
+    }
+    /* 答案唯一（可能来自多条，证据强弱只影响"用哪条的正文/解析"）→ 补给没答案的 */
+    const best = withAns.slice().sort((a, b) => rankEntry(ent[b]) - rankEntry(ent[a]))[0];
+    const from = ent[best];
+    for (const k of noAns) {
+      const e = ent[k];
+      e.answer = from.answer;
+      if (from.answerText) e.answerText = from.answerText;
+      if (!e.why && from.why) e.why = from.why;
+      if (from.official) e.official = true;
+      e.filledFrom = best;                       /* 溯源：答案是从哪条补来的 */
+      e.answers = (e.answers || []).concat([{
+        answer: from.answer, answerText: from.answerText || '', why: from.why || '',
+        picked: !!from.picked, notPicked: '', srcs: ['loose:' + best.slice(0, 8)], at: '', n: 1,
+      }]);
+    }
+    rep.filled += noAns.length;
+    rep.same++;
+    if (withAns.length > 1) {
+      const mx = Math.max.apply(null, withAns.map((k) => Number(ent[k].n) || 1));
+      for (const k of withAns) ent[k].n = mx;
+    }
+  }
+  return rep;
+}
+
 function parseBank(raw) {
   const empty = { version: BANK_VERSION, builtAt: '', source: '', stats: {}, entries: {} };
   const txt = String(raw == null ? '' : raw).replace(/^\uFEFF/, '').trim();
@@ -620,7 +722,9 @@ function parseBank(raw) {
   const bankOut = {
     version: BANK_VERSION, builtAt: String(j.builtAt || ''), source: String(j.source || ''),
     stats: (j.stats && typeof j.stats === 'object') ? j.stats : {}, entries: out,
-    alias: alias, order: order
+    alias: alias, order: order,
+    /* 宽松键索引（内存里现建，不落盘；旧库读进来立即生效） */
+    loose: buildLooseIndex(out)
   };
   /* 【读进来就统一判断题口径】本地老条目里可能还是 `answer=B`（选项 A.对/B.错）——
      不归一的话，跟"别人码里的 错"一比就是**假冲突**（实测过）。见 normalizeBankJudgments。 */
@@ -714,14 +818,16 @@ const TRUST_LABEL = {
    为什么要别名键：同一道题在这份卷子里是第 3 题、在别人那份里可能是第 7 题，
    而题号是页面文字的一部分 —— 只认主键的话，库带到别的机器/别的课程就全查不中。
    别名键的剥离规则在建库端和运行端是**同一个函数**（aliasStem），两边必须一致。 */
-function lookup(bank, fpKey, type) {
-  if (!bank || !fpKey) return null;
+function lookup(bank, fpKey, type, q) {
+  /* fpKey 可以为空：宽松键兜底不需要主键（传 '' 时会跳过前三把键、直接走 loose）。
+     没有 q 时行为与以前完全一致（空键查不到任何东西）。 */
+  if (!bank) return null;
   const ent = (bank && bank.entries) || {};
   const idx = (bank && bank.alias) || null;
   const ord = (bank && bank.order) || null;
   let key = fpKey;
   let e = ent[key] || null;
-  let viaAlias = false, viaOrder = false;
+  let viaAlias = false, viaOrder = false, viaLoose = false;
   if (!e && idx) {
     /* 库里可能只有"另一种题号"的那一份 —— 通过别名索引倒着找回来 */
     const back = idx[fpKey];
@@ -732,12 +838,22 @@ function lookup(bank, fpKey, type) {
     const back = ord[fpKey];
     if (back && ent[back]) { e = ent[back]; key = back; viaOrder = true; }
   }
+  if (!e && q && bank && bank.loose) {
+    /* 【宽松键兜底 · 2026-10-18】同一题的不同抄写形态（题号后的逗号/空格、分隔标点）。
+       只收录唯一组；撞多条的不在索引里 → 这里查不到（宁可漏，不填错）。
+       注意：viaLoose 命中的答案字母同样不能直接信（选项顺序可能变）——
+       调用方要像 viaOrder 一样按**正文**重新定位。 */
+    let lk = '';
+    try { lk = LOOSE_FPR.looseOf(q); } catch (err) { lk = ''; }
+    const back = lk ? bank.loose[lk] : '';
+    if (back && ent[back]) { e = ent[back]; key = back; viaLoose = true; }
+  }
   if (!e) return null;
   if (String(e.type || '') !== String(type || '')) return null;
   if (!e.answer) return null;
   const trust = trustOf(e);
   return {
-    fp: key, entry: e, viaAlias: viaAlias, viaOrder: viaOrder,
+    fp: key, entry: e, viaAlias: viaAlias, viaOrder: viaOrder, viaLoose: viaLoose,
     answer: e.answer, answerText: e.answerText || '', why: e.why || '',
     picked: !!e.picked, trust: trust, trustLabel: TRUST_LABEL[trust] || trust,
     conflict: !!e.conflict,
@@ -764,10 +880,17 @@ function exportBank(bank, opts) {
   const src = (bank && bank.entries) || {};
   const entries = {};
   let skipped = 0, skippedUnverified = 0, withImages = 0;
+  const cand = [];
   for (const k of Object.keys(src)) {
     const e = src[k];
     if (!e || !e.answer || !e.stem) { skipped++; continue; }
     if (!withUnverified && !isReliable(e)) { skippedUnverified++; continue; }
+    cand.push({ k: k, e: e });
+  }
+  /* 【导出侧去重】同一题的不同写法只带一份（图片不兼容的各自保留） */
+  const dd = dedupeForExport(cand);
+  for (const x of dd.keep) {
+    const k = x.k, e = x.e;
     entries[k] = {
       fp: k, type: e.type, stem: e.stem, options: e.options || [],
       answer: e.answer, answerText: e.answerText || '', why: e.why || '',
@@ -796,6 +919,7 @@ function exportBank(bank, opts) {
       skippedNoAnswer: skipped,
       skippedUnverified: skippedUnverified,
       withImages: withImages,
+      deduped: dd.removed,
       from: String((o.from != null ? o.from : (bank && bank.source) || ''))
     },
     entries: entries
@@ -897,6 +1021,8 @@ function mergeBank(base, incoming, opts) {
     importedAt: new Date().toISOString(),
     importReport: rep
   });
+  /* 宽松键补答案（不删条目、不动主键）——建库/导入后顺手做一次 */
+  try { out.stats.fillReport = fillAnswersByLoose(out); } catch (err) {}
   return { bank: out, report: rep };
 }
 
@@ -1134,10 +1260,16 @@ function keysOnlyEntries(bank, opts) {
   const o = opts || {};
   const src = (bank && bank.entries) || {};
   const out = {};
+  const cand = [];
   for (const k of Object.keys(src)) {
     const e = src[k];
     if (!e || !e.answer) continue;                       /* 没答案的带了也没用 */
     if (!o.withUnverified && !isReliable(e)) continue;   /* 默认只带"能命中页面"的 */
+    cand.push({ k: k, e: e });
+  }
+  const dd = dedupeForExport(cand);
+  for (const x of dd.keep) {
+    const k = x.k, e = x.e;
     const one = { fp: k, type: e.type, answer: e.answer, answerText: e.answerText || '', n: e.n || 1 };
     if (e.fpAlt) one.fpAlt = e.fpAlt;
     if (e.fpOrder) one.fpOrder = e.fpOrder;
@@ -1288,6 +1420,34 @@ function imgCompatible(a, b) {
   return false;
 }
 
+/* 【导出侧去重 · 2026-10-18】同一道题的不同写法（宽松键相同）在导出件里只带一份，
+   **图片不兼容的各自保留**（图不同 = 可能是另一道题，不能合并）。
+   库本身不动 —— 只是导出件更干净。 */
+function dedupeForExport(cand) {
+  const groups = {};
+  const out = [];
+  for (const x of cand) {
+    let lk = '';
+    try { lk = LOOSE_FPR.looseOf(x.e); } catch (err) { lk = ''; }
+    if (!lk) { out.push(x); continue; }
+    const g = (groups[lk] = groups[lk] || []);
+    let placed = false;
+    for (const sub of g) {
+      if (sub.every((y) => imgCompatible(y.e, x.e))) { sub.push(x); placed = true; break; }
+    }
+    if (!placed) g.push([x]);
+  }
+  let removed = 0;
+  for (const lk of Object.keys(groups)) {
+    for (const sub of groups[lk]) {
+      const sorted = sub.slice().sort((a, b) => rankEntry(b.e) - rankEntry(a.e));
+      out.push(sorted[0]);
+      removed += sorted.length - 1;
+    }
+  }
+  return { keep: out, removed: removed };
+}
+
 function dedupeBank(bank, opts) {
   const o = opts || {};
   const src = (bank && bank.entries) || {};
@@ -1385,6 +1545,8 @@ function dedupeBank(bank, opts) {
   out.stats = Object.assign({}, out.stats, {
     entries: Object.keys(out.entries).length, dedupedAt: new Date().toISOString(), dedupeReport: rep
   });
+  /* 去重复之后再用宽松键补一轮答案（并掉的组已经合并；这一轮管"形态不同没并成"的） */
+  try { out.stats.fillReport = fillAnswersByLoose(out); } catch (err) {}
   return { bank: out, report: rep };
 }
 
@@ -2021,6 +2183,8 @@ module.exports = {
   serializeBank, parseBank, buildFromFile, crossCheckCache,
   /* 导出 / 导入 / 查库（答题链路用 parseBank + lookup） */
   exportBank, mergeBank, lookup, trustOf, TRUST_LABEL,
+  /* 宽松键（同题不同写法）：查库兜底 + 建库补答案（2026-10-18） */
+  fillAnswersByLoose, looseGroups,
   /* 已完成页面：读平台写出来的正确答案（stemKey 是"题干桥"，只做对应，不当主键） */
   stemKeyOf, stemIndexOf, typeFromStem, ingestGraded, scanGradedPage,
   CODE_PREFIX, keysOnlyEntries, encodeCode, decodeCode,

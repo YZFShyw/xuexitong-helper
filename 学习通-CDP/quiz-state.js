@@ -340,7 +340,23 @@ function makeFingerprinter(opts) {
     return String(qq.type || '?') + '｜' + stem.slice(0, 60) + (stem.length > 60 ? '…' : '') + '｜选项' + n + '个';
   };
 
-  return { fpOf, digestOf, normalizeForFp };
+  /* 【宽松键 · 2026-10-18】同一道题的**不同抄写形态**（题号后的逗号/空格、分隔标点差异）
+     会算出不同指纹。宽松键只去掉**分隔性标点**，保留结构符号（括号/运算符/引号）——
+     数学式子的结构不能被洗掉。键 = sha256("loose1\n"+题型+"\n"+去分隔标点题干+"\n"+
+     去分隔标点选项排序) 的前 hexLen 位。
+     用法：主键/别名/顺序键都 miss 时**兜底**；撞多条一律不用（宁可漏，不填错）。 */
+  const SEP_LOOSE = /[,，、;；。.．:：·・\s\u3000]+/g;
+  const looseText = (x) => String(x == null ? '' : x).replace(SEP_LOOSE, '');
+  const looseOf = (q) => {
+    const qq = q || {};
+    const stem = looseText(decode(String(qq.stem == null ? '' : qq.stem))).toLowerCase();
+    const opts2 = Array.isArray(qq.options) ? qq.options : [];
+    const opts = opts2.map((op) => looseText(decode(String((op && op.text) == null ? '' : op.text))).toLowerCase()).sort();
+    const type = looseText(decode(String(qq.type == null ? '' : qq.type)));
+    return hash('loose1\n' + type + '\n' + stem + '\n' + opts.join('\n')).slice(0, hexLen);
+  };
+
+  return { fpOf, digestOf, normalizeForFp, looseOf, looseText };
 }
 
 /* ============================================================================

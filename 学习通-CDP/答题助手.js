@@ -2448,7 +2448,7 @@ function makeHelper(cfg, deps) {
   };
   let bankLibs = [];               /* 这次实际查的库（日志里要说清答案来自哪个库） */
   const bankLibNames = () => bankLibs.map((x) => x.name).join('+');
-  const bankGet = (fpKey, type, imgs, altKey, orderKey, pageImgIds) => {
+  const bankGet = (fpKey, type, imgs, altKey, orderKey, pageImgIds, q) => {
     const libs = bankLoadAll();
     if (!libs.length) return null;
 
@@ -2462,7 +2462,9 @@ function makeHelper(cfg, deps) {
          注意：走 orderKey 命中的，字母**不能信**（顺序可能变了），调用方要按正文重新定位。 */
       const hit = QB.lookup(L.bank, fpKey, type)
         || (altKey ? QB.lookup(L.bank, altKey, type) : null)
-        || (orderKey ? QB.lookup(L.bank, orderKey, type) : null);
+        || (orderKey ? QB.lookup(L.bank, orderKey, type) : null)
+        /* 【第四道兜底 · 宽松键】题面标点/题号写法与库里不同时用；撞多条不会命中 */
+        || (q ? QB.lookup(L.bank, '', type, q) : null);
       if (!hit) continue;
       /* 【没答案的条目当没命中】那些是"占位"条目（题面在、答案还没采到），
          拿来用只会打出"答案（题库）："这种空壳日志。留着它们是为了以后合并答案，不是现在用。 */
@@ -2809,9 +2811,9 @@ function makeHelper(cfg, deps) {
         const fpKey = fp.fpOf(q);
         /* 页面这道题的图片指纹（算不出来就是空 —— 那时候按老办法用 URL 比） */
         const pageIds = (q.imgs || []).map((u) => imgIds.get(u)).filter(Boolean);
-        const bk = bankGet(fpKey, q.type, q.imgs, altKeyOf(q), orderKeyOf(q), pageIds);
+        const bk = bankGet(fpKey, q.type, q.imgs, altKeyOf(q), orderKeyOf(q), pageIds, q);
         if (!bk || !bk.hit) return bk;
-        if (!bk.hit.viaOrder) return bk;
+        if (!bk.hit.viaOrder && !bk.hit.viaLoose) return bk;
         const rm = remapAnswerByText(bk.hit, q);
         if (!rm) return { miss: '选项顺序/字母对不上，按正文也没定位到（不填）' };
         return { hit: Object.assign({}, bk.hit, { answer: rm.answer, answerText: rm.answerText || bk.hit.answerText, byText: true }) };
@@ -3052,7 +3054,8 @@ function makeHelper(cfg, deps) {
             for (const o of qq.options) lines.push('        ' + (o.letter || '?') + '. ' + o.text);
             lines.push('      → 答案（题库' + (hit.lib ? '·' + hit.lib : '') + '·' + hit.trustLabel + '）：' + hit.answer +
               (hit.answerText ? '　【' + hit.answerText + '】' : '') +
-              (hit.byText ? '（选项顺序/字母和库里不一样，已按**正文**重新对上）' : ''));
+              (hit.byText ? '（选项顺序/字母和库里不一样，已按**正文**重新对上）' : '') +
+              (hit.viaLoose ? '（宽松键命中：题面标点/题号写法与库里不同）' : ''));
             if (hit.conflict) lines.push('        ⚠ ' + hit.conflictNote);
             if (cfg.autoFill && !r.graded) {
               const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt);
@@ -3116,7 +3119,8 @@ function makeHelper(cfg, deps) {
             for (const o of qq.options) lines.push('        ' + (o.letter || '?') + '. ' + o.text);
             lines.push('      → 答案（题库' + (hit.lib ? '·' + hit.lib : '') + '·' + hit.trustLabel + '）：' + hit.answer +
               (hit.answerText ? '　【' + hit.answerText + '】' : '') +
-              (hit.byText ? '（选项顺序/字母和库里不一样，已按**正文**重新对上）' : ''));
+              (hit.byText ? '（选项顺序/字母和库里不一样，已按**正文**重新对上）' : '') +
+              (hit.viaLoose ? '（宽松键命中：题面标点/题号写法与库里不同）' : ''));
             if (hit.conflict) lines.push('        ⚠ ' + hit.conflictNote);
             if (cfg.autoFill && !r.graded) {
               const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt);
