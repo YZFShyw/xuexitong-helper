@@ -51,6 +51,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const quizMod = require('./答题助手.js');
 const hbMod = require('./伪心跳.js');
+const pendingMod = require('./待补答案.js');   /* 待补答案清单：漏题累积（人工补答案后回填题库） */
 
 const PORT = Number(process.env.CDP_PORT || 9222);
 const RUN = process.argv.includes('--run');
@@ -2659,6 +2660,9 @@ const DOC_STEP = `(function(){
   function recordMiss(rec) {
     missedList.push(rec);
     quizStats.missed++;
+    /* 【待补答案清单 · 2026-10-18】漏题跨运行累积（按指纹去重、次数累加）。
+       写失败绝不影响驱动 —— 它只是"以后人工补库"的线索，不是运行必需。 */
+    try { pendingMod.addMiss(rec); } catch (e) {}
     if (!missFileReady) return;
     try {
       fs.appendFileSync(MISS_FILE,

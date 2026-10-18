@@ -1492,3 +1492,31 @@ test('题库码去重：同一题的不同写法只带一份', () => {
   assert.equal(Object.keys(ents).length, 2, '题库码也只带一份');
 });
 
+
+/* ---------------- 前缀+选项集合键（2026-10-18，题干尾部被改写的兜底） ---------------- */
+
+test('前缀键：题干尾部被改写（前 40 字与选项集合相同）→ 兜底命中（viaPrefix）', () => {
+  const k = 'c'.repeat(32);
+  const longStem = 'X'.repeat(60);
+  const bank = bankFromEntries({ [k]: mkOne(k, longStem, 'A') });
+  const page = {
+    type: '单选', stem: longStem.slice(0, 45) + '（平台改写）',
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+  };
+  const h = QB.lookup(bank, '', '单选', page);
+  assert.ok(h, '应通过前缀键命中');
+  assert.equal(h.viaPrefix, true, '要标明走的是前缀键');
+  assert.equal(h.answer, 'A');
+});
+
+test('前缀键：选项集合不同 → 不命中（选项必须逐字相同）', () => {
+  const k = 'd'.repeat(32);
+  const longStem = 'Y'.repeat(60);
+  const bank = bankFromEntries({ [k]: mkOne(k, longStem, 'A') });
+  const page = {
+    type: '单选', stem: longStem.slice(0, 45) + '（平台改写）',
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '丙' }],
+  };
+  assert.equal(QB.lookup(bank, '', '单选', page), null, '选项不同必须拒绝');
+});
+

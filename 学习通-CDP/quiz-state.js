@@ -356,7 +356,21 @@ function makeFingerprinter(opts) {
     return hash('loose1\n' + type + '\n' + stem + '\n' + opts.join('\n')).slice(0, hexLen);
   };
 
-  return { fpOf, digestOf, normalizeForFp, looseOf, looseText };
+  /* 【前缀+选项集合键 · 2026-10-18】给"题干尾部被改写/截断、但主体和选项没变"的题兜底：
+     键 = sha256("prefix1\n"+题型+"\n"+规范化题干的前 40 字+"\n"+选项文本排序集合)。
+     选项集合**必须完全一致**（这是硬约束：只差尾部文字的同一题才会命中，不同题撞不上）。
+     用法：主键/别名/顺序键都 miss 时再试；命中后字母仍要按正文重定位。 */
+  const prefixOf = (q) => {
+    const qq = q || {};
+    const stem = normalizeForFp(decode(String(qq.stem == null ? '' : qq.stem))).slice(0, 40);
+    const opts2 = Array.isArray(qq.options) ? qq.options : [];
+    const opts = opts2.map((op) => normalizeForFp(decode(String((op && op.text) == null ? '' : op.text)))).sort();
+    const type = normalizeForFp(String(qq.type == null ? '' : qq.type));
+    if (!stem) return '';
+    return hash('prefix1\n' + type + '\n' + stem + '\n' + opts.join('\n')).slice(0, hexLen);
+  };
+
+  return { fpOf, digestOf, normalizeForFp, looseOf, looseText, prefixOf };
 }
 
 /* ============================================================================

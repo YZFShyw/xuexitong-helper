@@ -2813,7 +2813,7 @@ function makeHelper(cfg, deps) {
         const pageIds = (q.imgs || []).map((u) => imgIds.get(u)).filter(Boolean);
         const bk = bankGet(fpKey, q.type, q.imgs, altKeyOf(q), orderKeyOf(q), pageIds, q);
         if (!bk || !bk.hit) return bk;
-        if (!bk.hit.viaOrder && !bk.hit.viaLoose) return bk;
+        if (!bk.hit.viaOrder && !bk.hit.viaLoose && !bk.hit.viaPrefix) return bk;
         const rm = remapAnswerByText(bk.hit, q);
         if (!rm) return { miss: '选项顺序/字母对不上，按正文也没定位到（不填）' };
         return { hit: Object.assign({}, bk.hit, { answer: rm.answer, answerText: rm.answerText || bk.hit.answerText, byText: true }) };

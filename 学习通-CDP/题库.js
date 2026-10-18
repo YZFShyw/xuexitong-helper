@@ -590,6 +590,24 @@ function buildLooseIndex(entries) {
   return idx;
 }
 
+/* 【前缀+选项集合索引 · 2026-10-18】题干前 40 字 + 选项集合完全一致才收录；
+   撞多条（同一前缀下多道题）整组不用。用于"尾部被改写/截断"的兜底。 */
+function buildPrefixIndex(entries) {
+  const idx = {};
+  const dup = {};
+  for (const k of Object.keys(entries || {})) {
+    const e = entries[k];
+    if (!e) continue;
+    let pk = '';
+    try { pk = LOOSE_FPR.prefixOf(e); } catch (err) { pk = ''; }
+    if (!pk) continue;
+    if (idx[pk] && idx[pk] !== k) { dup[pk] = true; continue; }
+    idx[pk] = k;
+  }
+  for (const pk of Object.keys(dup)) delete idx[pk];
+  return idx;
+}
+
 /* 【宽松键补答案 · 2026-10-18】同一题的不同写法在库里分成多条时：
    · 有答案的 → 把答案补给**没答案**的那条（记 filledFrom，可溯源）；
    · 都有答案但不同 → 互相补进 answers 并标 conflict（不替用户选）；
@@ -724,7 +742,8 @@ function parseBank(raw) {
     stats: (j.stats && typeof j.stats === 'object') ? j.stats : {}, entries: out,
     alias: alias, order: order,
     /* 宽松键索引（内存里现建，不落盘；旧库读进来立即生效） */
-    loose: buildLooseIndex(out)
+    loose: buildLooseIndex(out),
+    prefix: buildPrefixIndex(out)
   };
   /* 【读进来就统一判断题口径】本地老条目里可能还是 `answer=B`（选项 A.对/B.错）——
      不归一的话，跟"别人码里的 错"一比就是**假冲突**（实测过）。见 normalizeBankJudgments。 */
@@ -827,7 +846,7 @@ function lookup(bank, fpKey, type, q) {
   const ord = (bank && bank.order) || null;
   let key = fpKey;
   let e = ent[key] || null;
-  let viaAlias = false, viaOrder = false, viaLoose = false;
+  let viaAlias = false, viaOrder = false, viaLoose = false, viaPrefix = false;
   if (!e && idx) {
     /* 库里可能只有"另一种题号"的那一份 —— 通过别名索引倒着找回来 */
     const back = idx[fpKey];
@@ -837,6 +856,14 @@ function lookup(bank, fpKey, type, q) {
     /* 再退一步：题号 + 选项顺序都可能不一样，只剩"题干 + 选项正文集合"能对上 */
     const back = ord[fpKey];
     if (back && ent[back]) { e = ent[back]; key = back; viaOrder = true; }
+  }
+  if (!e && q && bank && bank.prefix) {
+    /* 【前缀键兜底 · 2026-10-18】题干尾部被改写/截断、但前 40 字和选项集合完全一致。
+       比宽松键更严（宽松键只管分隔标点；前缀键要求选项集合逐字相同）。 */
+    let pk = '';
+    try { pk = LOOSE_FPR.prefixOf(q); } catch (err) { pk = ''; }
+    const back = pk ? bank.prefix[pk] : '';
+    if (back && ent[back]) { e = ent[back]; key = back; viaPrefix = true; }
   }
   if (!e && q && bank && bank.loose) {
     /* 【宽松键兜底 · 2026-10-18】同一题的不同抄写形态（题号后的逗号/空格、分隔标点）。
@@ -853,7 +880,7 @@ function lookup(bank, fpKey, type, q) {
   if (!e.answer) return null;
   const trust = trustOf(e);
   return {
-    fp: key, entry: e, viaAlias: viaAlias, viaOrder: viaOrder, viaLoose: viaLoose,
+    fp: key, entry: e, viaAlias: viaAlias, viaOrder: viaOrder, viaLoose: viaLoose, viaPrefix: viaPrefix,
     answer: e.answer, answerText: e.answerText || '', why: e.why || '',
     picked: !!e.picked, trust: trust, trustLabel: TRUST_LABEL[trust] || trust,
     conflict: !!e.conflict,
@@ -2183,6 +2210,8 @@ module.exports = {
   serializeBank, parseBank, buildFromFile, crossCheckCache,
   /* 导出 / 导入 / 查库（答题链路用 parseBank + lookup） */
   exportBank, mergeBank, lookup, trustOf, TRUST_LABEL,
+  /* 待补答案回填要用：把新答案设为默认（排序规则不变） */
+  applyTopAnswer,
   /* 宽松键（同题不同写法）：查库兜底 + 建库补答案（2026-10-18） */
   fillAnswersByLoose, looseGroups,
   /* 已完成页面：读平台写出来的正确答案（stemKey 是"题干桥"，只做对应，不当主键） */
