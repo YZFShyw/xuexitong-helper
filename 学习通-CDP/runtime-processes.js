@@ -254,7 +254,17 @@ const PS_QUERY = [
   '    start   = (Dsh-Start $p)',
   '  }',
   '}',
-  'ConvertTo-Json -InputObject ([pscustomobject]@{ rows = $rows; cmdErr = [string]$script:DshCmdErr }) -Compress -Depth 4',
+  /* 【2026-10-18 修 · BUG-2026-1018-01】不再让 ConvertTo-Json 直接进标准输出 ——
+     PowerShell 5.1 写重定向文件时用的是 [Console]::OutputEncoding，它跟着**控制台代码页**走：
+     936 的控制台里吐 GBK 字节，Node 按 UTF-8 解就成 "ѧϰͨ…"（锁里 exe 乱码的根因）。
+     这里自己拿 UTF-8 字节写标准输出，**不碰 Console.OutputEncoding**（改它会把外套的 936
+     控制台改成 65001，反过来把 cmd 自己的中文回显搞乱）。 */
+  '$json = ConvertTo-Json -InputObject ([pscustomobject]@{ rows = $rows; cmdErr = [string]$script:DshCmdErr }) -Compress -Depth 4',
+  '$bytes = [System.Text.Encoding]::UTF8.GetBytes($json)',
+  '$so = [Console]::OpenStandardOutput()',
+  '$so.Write($bytes, 0, $bytes.Length)',
+  '$so.Flush()',
+  '$so.Close()',
 ].join('\n');
 
 /* 【为什么不直接 spawnSync(..., {encoding:'utf8'})】
@@ -262,6 +272,43 @@ const PS_QUERY = [
  * 报出来的错还长得像"PowerShell 不存在"，很容易被误判成系统问题。
  * 这里改成把 stdout/stderr 重定向到临时文件，对沙箱/杀软都友好，
  * 也不受管道缓冲区大小限制（几千行进程信息完全够）。 */
+/* 【2026-10-18 修 · BUG-2026-1018-01 第二道保险】
+   把捕获文件按 UTF-8 解；解出替换符（U+FFFD）就说明字节其实是 GBK ——
+   按 GBK 重解（PowerShell 5.1 在 936 控制台下写出的就是 GBK）。
+   注意：这一步是兜底，不是主修 —— 主修在 PS_QUERY 里（强制 UTF-8 字节输出），
+   因为"GBK 恰好解成合法 UTF-8 字符"的组合（如 学=D1A7 → ѧ）不会出现 U+FFFD。 */
+function decodeTextAuto(buf) {
+  if (!buf || !buf.length) return '';
+  const utf8 = buf.toString('utf8');
+  const odd = (s) => s.indexOf('\uFFFD') >= 0
+    || /[\u0370-\u03FF\u0400-\u04FF\u0300-\u036F]/.test(s);   /* 希腊/西里尔/组合符 */
+  if (!odd(utf8)) return utf8;
+  /* 第二个信号：GBK 的汉字双字节（学=D1A7 → ѧ）恰好可能是合法 UTF-8，不会产生替换符，
+     所以只看 U+FFFD 会漏。出现希腊/西里尔这类"正常文本里几乎不该有"的字符时，
+     再按 GBK 试解一次：**解出来没有替换符、也没有这些怪字符**才采用。
+     （这一段是兜底；主修在 PS_QUERY —— 它已经强制输出 UTF-8 字节。） */
+  try {
+    const gbk = new TextDecoder('gbk').decode(buf);
+    if (gbk && gbk.indexOf('\uFFFD') < 0 && !/[\u0370-\u03FF\u0400-\u04FF\u0300-\u036F]/.test(gbk)) {
+      return gbk;
+    }
+  } catch (e) {}
+  return utf8;
+}
+
+/* 这条路径看着像"GBK 被当成 UTF-8 解"的产物吗？
+   判定刻意收紧：带 U+FFFD，或带正常 Windows 路径里几乎不会出现的希腊/西里尔/组合符
+   **且这个路径在本机不存在**（真路径哪怕含中文，existsSync 会把它排除）。
+   只用于"锁里的冗余字段（exe）"和"命令行里的相对参数"这种**辅助证据**，
+   主身份判据（pid + 创建时间 + driver.js 路径）一个都不放宽。 */
+function looksLikeMojibakePath(p) {
+  const s = String(p == null ? '' : p);
+  if (!s) return false;
+  if (s.indexOf('\uFFFD') >= 0) return true;
+  try { if (fs.existsSync(s)) return false; } catch (e) {}
+  return /[\u0370-\u03FF\u0400-\u04FF\u0300-\u036F]/.test(s);
+}
+
 function runCapture(exe, args, timeoutMs, extraEnv) {
   /* 【候选临时目录 · 2026-10-17 二修（对面复核指出的真缺口）】
      一修只兜"建目录失败"：如果 mkdir/mkdtemp 成功、**建文件被拒**（卡巴典型行为：
@@ -322,14 +369,17 @@ function runCapture(exe, args, timeoutMs, extraEnv) {
     });
     fs.closeSync(fo); fo = null;
     fs.closeSync(fe); fe = null;
-    const read = (f) => { try { return fs.readFileSync(f, 'utf8'); } catch (e) { return ''; } };
+    const readBytes = (f) => { try { return fs.readFileSync(f); } catch (e) { return Buffer.alloc(0); } };
+    const ob = readBytes(outFile);
+    const eb = readBytes(errFile);
     return {
       ok: !r.error,
       error: r.error || null,
       status: r.status,
       timedOut: !!(r.error && (r.error.code === 'ETIMEDOUT' || r.signal)),
-      stdout: read(outFile),
-      stderr: read(errFile),
+      stdout: decodeTextAuto(ob),
+      stderr: decodeTextAuto(eb),
+      stdoutBytes: ob,
     };
   } catch (e) {
     return { ok: false, error: e, status: null, timedOut: false, stdout: '', stderr: '' };
@@ -374,12 +424,25 @@ function listProcesses(timeoutMs) {
     const tmpTail = (r && Array.isArray(r.tmpErrs) && r.tmpErrs.length) ? ('（临时目录：' + r.tmpErrs.join(' | ') + '）') : '';
     return { ok: false, reason: '进程查询失败：' + ((r && r.error && r.error.message) || '未知') + tmpTail, list: [] };
   }
-  const raw = String(r.stdout || '').trim();
+  /* 【2026-10-18 修】r.stdout 已由 decodeTextAuto 解过；这里再剥 BOM（旧输出可能带）。
+     JSON 解析失败时，用原始字节按 GBK 再解一次（第二道保险）。 */
+  const raw = String(r.stdout || '').replace(/^\uFEFF/, '').trim();
   if (!raw) {
     return { ok: false, reason: '进程查询没返回内容（PowerShell 可能被禁用）', list: [] };
   }
   let parsed;
-  try { parsed = JSON.parse(raw); } catch (e) { return { ok: false, reason: '进程查询结果不是 JSON', list: [] }; }
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    let alt = '';
+    try {
+      if (r.stdoutBytes && r.stdoutBytes.length) {
+        alt = new TextDecoder('gbk').decode(r.stdoutBytes).replace(/^\uFEFF/, '').trim();
+      }
+    } catch (e2) {}
+    if (alt && alt !== raw) { try { parsed = JSON.parse(alt); } catch (e3) {} }
+    if (!parsed) return { ok: false, reason: '进程查询结果不是 JSON', list: [] };
+  }
   /* 新形态 { rows, cmdErr }（2026-10-17）；也兼容旧的纯数组形态。 */
   let arr;
   let cmdErr = '';
@@ -496,6 +559,19 @@ function lockIdentity(lock) {
  * proc 为 null（进程不存在）→ ok:false。
  * 只有 PID 活着、但映像名/命令行/创建时间对不上 → 一律 ok:false（PID 复用）。
  */
+/** 命令行里的某个参数是不是"那个驱动器脚本"。
+ *  【2026-10-18 修 · BUG-2026-1018-01 第二处缺陷】外套 `cd /d` 到包目录后用**相对路径**
+ *  `driver.js` 启动驱动器；而 pathEquals→normalizePath 里的 path.resolve 是按**调用方的 cwd**
+ *  解析的 —— 于是"判活"结果取决于你从哪个目录敲命令（网页控制台/别的会话从别处调就判失败）。
+ *  这里对相对参数一律按**脚本所在目录**补全再比，绝不按调用方的 cwd 猜。 */
+function argIsDriverScript(a, wantScript) {
+  if (!a || !wantScript) return false;
+  if (pathEquals(a, wantScript)) return true;
+  const s = String(a).trim().replace(/^"|"$/g, '');
+  if (!s || path.isAbsolute(s)) return false;
+  try { return pathEquals(path.resolve(path.dirname(wantScript), s), wantScript); } catch (e) { return false; }
+}
+
 function verifyDriverProcess(lock, proc, expectScript) {
   const id = lockIdentity(lock);
   if (!id) return { ok: false, reason: '锁里没有可验证的身份（缺 pid / 创建时间），不能认定它在跑' };
@@ -531,7 +607,7 @@ function verifyDriverProcess(lock, proc, expectScript) {
   let scriptOk = false;
   if (wantScript) {
     for (const a of allArgs) {
-      if (pathEquals(a, wantScript)) { scriptOk = true; break; }
+      if (argIsDriverScript(a, wantScript)) { scriptOk = true; break; }
     }
   }
   if (!scriptOk) {
@@ -549,7 +625,14 @@ function verifyDriverProcess(lock, proc, expectScript) {
      普通用户读别的用户的进程 Path 会失败（读成空），那种情况不能当成"身份不符"，
      否则一次正常的启动会被误判成 PID 复用。真正防 PID 复用的是创建时间。 */
   if (proc.exe && id.exe && !pathEquals(proc.exe, id.exe)) {
-    return { ok: false, reason: 'PID ' + id.pid + ' 的 node 映像路径跟锁里记的不一样（' + proc.exe + ' ≠ ' + id.exe + '）' };
+    /* 【2026-10-18 修 · BUG-2026-1018-01】锁里的 exe 可能是旧版在 936 控制台下写出的
+       GBK 乱码（"ѧϰͨ…"）。这种值已经不构成"身份不符"的证据 —— 两边只要有一边
+       "像乱码"，就按"无法核对"记账，继续用主判据（pid + 创建时间 + driver.js 完整路径）
+       说话。注意：正常路径（哪怕已删除）**绝不**宽松，那条路仍严格比较。 */
+    const moj = looksLikeMojibakePath(id.exe) || looksLikeMojibakePath(proc.exe);
+    if (!moj) {
+      return { ok: false, reason: 'PID ' + id.pid + ' 的 node 映像路径跟锁里记的不一样（' + proc.exe + ' ≠ ' + id.exe + '）' };
+    }
   }
   return { ok: true, reason: '身份验证通过（PID ' + id.pid + '，创建于 ' + id.start + '）' };
 }
@@ -590,7 +673,25 @@ function readVerifiedDriver(baseDir, opts) {
   }
   const proc = findByPid(id.pid, res.list);
   const v = verifyDriverProcess(lock, proc, expectScript);
+  if (v.ok) healLockExe(baseDir, proc, lock);   /* 乱码 exe 顺手自愈（只改 exe 一个字段） */
   return { pid: id.pid, alive: !!v.ok, verified: !!v.ok, reason: v.reason, batch: id.batch };
+}
+
+/* 【2026-10-18 修 · BUG-2026-1018-01 自愈】锁里的 exe 若是旧版写出的乱码、
+   而现场读到的是正确路径（且身份已通过主判据），只把 exe 一个字段补回去；
+   pid / start / script / token 一个字节都不动。写失败就算了（只影响诊断显示）。 */
+function healLockExe(baseDir, proc, lock) {
+  try {
+    if (!baseDir || !proc || !proc.exe || !lock || !lock.exe) return false;
+    if (pathEquals(proc.exe, lock.exe)) return false;
+    if (!looksLikeMojibakePath(lock.exe)) return false;
+    const lf = lockPath(baseDir);
+    const cur = JSON.parse(fs.readFileSync(lf, 'utf8').replace(/^\uFEFF/, ''));
+    if (!cur || String(cur.pid) !== String(lock.pid)) return false;
+    cur.exe = String(proc.exe);
+    fs.writeFileSync(lf, JSON.stringify(cur), 'utf8');
+    return true;
+  } catch (e) { return false; }
 }
 
 /** 旧 运行中.pid：只当线索，读到 PID 之后照样要验身份 */
@@ -619,7 +720,7 @@ function readLegacyPidHint(dir, expectScript) {
   const allArgs = [parsed.exe].concat(parsed.args);
   const want = normalizePath(expectScript);
   let scriptOk = false;
-  for (const a of allArgs) if (want && pathEquals(a, want)) { scriptOk = true; break; }
+  for (const a of allArgs) if (argIsDriverScript(a, want)) { scriptOk = true; break; }
   if (!scriptOk) {
     return { pid, alive: false, verified: false,
              reason: '旧 运行中.pid 里的 PID ' + pid + ' 是 node，但命令行里没有预期的驱动脚本参数（' +
@@ -1309,6 +1410,10 @@ module.exports = {
   classifyEdgeCommandLine,
   pickOwnedEdge,
   listProcesses,
+  /* 编码与身份辅助（供测试直接用） */
+  decodeTextAuto,
+  looksLikeMojibakePath,
+  argIsDriverScript,
   /* 常量 */
   LOCK_FILE,
   LEGACY_PID_FILE,

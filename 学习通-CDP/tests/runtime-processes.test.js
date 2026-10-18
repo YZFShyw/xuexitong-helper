@@ -520,4 +520,50 @@ test('源码接线：错误保真 / 三态 / 总截止 / 临时目录回退（�
   assert.ok(SRC.includes("'.dsh-proc-tmp'"), '临时目录要有可写回退（不再回到刚失败的 TEMP）');
   assert.ok(SRC.includes("f1 = fs.openSync(o, 'w')"), '建文件必须放进候选循环里试（mkdtemp 成功但建文件被拒时要换下一级）');
   assert.ok(SRC.includes('readdirSync(d)'), '候选失败要清掉半成品目录（不留垃圾）');
+  assert.ok(SRC.includes('OpenStandardOutput'), 'PS_QUERY 必须自己写 UTF-8 字节（936 控制台下 ConvertTo-Json 会吐 GBK）');
+  assert.ok(SRC.includes('decodeTextAuto'), 'runCapture 必须走自动解码（UTF-8 失败回退 GBK）');
+});
+
+/* ---------------- 2026-10-18 修：BUG-2026-1018-01（936 控制台下锁里 exe 乱码） ---------------- */
+
+const MOJI_EXE = 'C:\\\u0467\u03f0\u03f0\u03f0-CDP\\node\\node.exe';   /* 长得就像 GBK 被当 UTF-8 解 */
+
+test('解码：GBK 字节按 UTF-8 解出替换符时就回退 GBK', () => {
+  const gbk = Buffer.from([0xd1, 0xa7, 0xcf, 0xb0, 0xcd, 0xa8]);   /* “学习通”的 GBK 字节 */
+  assert.equal(rp.decodeTextAuto(gbk).indexOf('学习通'), 0, 'GBK 字节必须能解回中文');
+  const utf8 = Buffer.from('学习通', 'utf8');
+  assert.equal(rp.decodeTextAuto(utf8), '学习通', '本来就是 UTF-8 的不许被改');
+});
+
+test('乱码判定：只在“像乱码且路径不存在”时成立，真实路径绝不误判', () => {
+  assert.equal(rp.looksLikeMojibakePath(MOJI_EXE), true, '西里尔/希腊乱码且不存在 → 是乱码');
+  assert.equal(rp.looksLikeMojibakePath('C:\\\uFFFD\uFFFD-CDP\\node.exe'), true, '带替换符 → 是乱码');
+  assert.equal(rp.looksLikeMojibakePath(__dirname), false, '真实存在的路径 → 不是乱码');
+  assert.equal(rp.looksLikeMojibakePath('C:\\不存在的目录\\node.exe'), false, '正常中文路径 → 不是乱码');
+});
+
+test('判活：锁里 exe 是乱码、现场路径正常 → 按“无法核对”放行（主判据仍然在）', () => {
+  const dir = mkdir('moji-lock');
+  writeLock(dir, driverLock({ exe: MOJI_EXE }));
+  withFakeWorld([proc({ pid: 4242, start: '1000', cmdline: '"' + NODE_EXE + '" "' + DRIVER_SCRIPT + '" --run --next' })]);
+  const r = rp.readVerifiedDriver(dir, { driverScript: DRIVER_SCRIPT });
+  assert.equal(r.alive, true, 'exe 乱码不该否决身份（pid+创建时间+driver.js 路径都对）');
+  const j = JSON.parse(fs.readFileSync(path.join(dir, rp.LOCK_FILE), 'utf8'));
+  assert.equal(j.exe, NODE_EXE, '自愈：锁里的 exe 应该被补成正确路径');
+});
+
+test('判活：锁里 exe 是“正常但不同”的路径 → 仍然拒绝（宽松只给乱码）', () => {
+  const dir = mkdir('moji-strict');
+  writeLock(dir, driverLock({ exe: 'C:\\Other\\nodejs\\node.exe' }));
+  withFakeWorld([proc({ pid: 4242, start: '1000', cmdline: '"' + NODE_EXE + '" "' + DRIVER_SCRIPT + '" --run' })]);
+  const r = rp.readVerifiedDriver(dir, { driverScript: DRIVER_SCRIPT });
+  assert.equal(r.alive, false, '正常路径不一致必须照旧拒绝');
+});
+
+test('判活：命令行里是相对 driver.js（外套就是这么启动的）→ 按脚本目录解析，不依赖 cwd', () => {
+  const dir = mkdir('rel-arg');
+  writeLock(dir, driverLock());
+  withFakeWorld([proc({ pid: 4242, start: '1000', cmdline: '"' + NODE_EXE + '" driver.js --run --next' })]);
+  const r = rp.readVerifiedDriver(dir, { driverScript: DRIVER_SCRIPT });
+  assert.equal(r.alive, true, '相对参数必须能对上（否则换个 cwd 判活就失败）');
 });
