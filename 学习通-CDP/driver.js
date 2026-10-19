@@ -3423,11 +3423,11 @@ const DOC_STEP = `(function(){
         return 'skipped';
       }
     }
-    if (quizTriedFor === chapter) return 'skipped';
+    if (quizTriedFor === chapter && process.env.XUEXITONG_FORCE_QUIZ !== '1') return 'skipped';
     /* 这一章这一轮已经把题填进去了：别再填第二遍（重填会再花一次 API，
        而且实测重复填的那一处正好是驱动器消失的位置）。当成 'handled' 返回，
        让上层照常往下走（滚文档、翻页）。 */
-    if (quizFilledKeys.has(chapter)) {
+    if (quizFilledKeys.has(chapter) && process.env.XUEXITONG_FORCE_QUIZ !== '1') {
       const dec = await verifyRestoredFilled(chapter);
       if (dec !== 'reuse') {
         /* 复核没过：这一章要当真重新处理一次，别走下面那条"已填过"的短路 */
@@ -3650,6 +3650,9 @@ const DOC_STEP = `(function(){
      状态里只记这些去重账，不存任何凭据。 */
   function restoreCheckpoint() {
     if (!CHK || !checkpointMod) return;
+    /* 【测试开关】命中率实测时要逐章重做（只读题/查库），不能继承"本轮填过"的旧账。
+       只影响这一轮，正常启动不设这个变量就还是老行为。 */
+    if (process.env.XUEXITONG_NO_RESTORE === '1') { log('（测试开关：跳过"上一轮已填过"的恢复，逐章重做）'); return; }
     let from = null;
     try { from = checkpointMod.findRestorableBatch(__dirname, { currentBatch: CHECKPOINT_BATCH, maxAgeMs: 6 * 3600 * 1000 }); }
     catch (e) { return; }

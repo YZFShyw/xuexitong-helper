@@ -363,7 +363,10 @@ function makeEntryBuilder(opts) {
     }
 
     /* 答案证据（同指纹不同答案**不覆盖**，一条一条留着） */
-    const ans = normalizeAnswer(q.answer);
+    /* 【判断题答案一律存正文】记录里可能写成 A/B（2026-10-12 缺陷 3 的老数据）——
+       建库这条唯一入口先归一，到运行时才不会出现"答案 A 填不进页面"。 */
+    const jz0 = normalizeJudgmentAnswer(q.type, normalizeAnswer(q.answer), q.answer);
+    const ans = (jz0.changed && jz0.answer) ? jz0.answer : normalizeAnswer(q.answer);
     const srcTag = (isDom ? 'self' : 'transcribe') + ':' + (q.chapter || '?');
     if (ans) {
       const letter = ans;

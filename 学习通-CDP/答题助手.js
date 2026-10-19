@@ -1820,7 +1820,12 @@ async function tryFill(ev, rawStem, answer, type, clickAt) {
 
   let spec;
   if (type === '判断') {
-    const syn = JUDGE_SYN[String(answer).trim()];
+    /* 【判断题答案兜底】题库里可能存成字母（A/B）—— 判断题的 A.对 / B.错 是固定映射，
+       这里先归一，别让"答案 A 不认识"把一道明明能做的题漏掉。 */
+    let a0 = String(answer).trim();
+    if (/^[Aa]$/.test(a0)) a0 = '对';
+    else if (/^[Bb]$/.test(a0)) a0 = '错';
+    const syn = JUDGE_SYN[a0];
     if (!syn) return '（判断题答案「' + answer + '」不认识，没填）';
     spec = { by: 'text', v: syn };
   } else if (type === '单选' || type === '多选') {
