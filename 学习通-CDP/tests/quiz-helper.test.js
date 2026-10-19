@@ -40,6 +40,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+/* 题图指纹会多调 ev（题干区坐标）——本文件用的是"按调用顺序返回预设值"的假 ev，
+   多调一次就会打乱它的状态机；这里显式跳过（题图指纹由 _实验 下的独立脚本验证）。 */
+process.env.QUIZ_TEST = '1';
 const quiz = require(path.join(__dirname, '..', '答题助手.js'));
 const QS = require(path.join(__dirname, '..', 'quiz-state.js'));
 

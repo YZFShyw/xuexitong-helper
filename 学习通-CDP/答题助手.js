@@ -36,6 +36,10 @@ const FI = require('./字体识别.js');
    现在只"顺手攒"：算出来的 id 写进记录单独一行，供以后把"图片身份"并进匹配键（v3）。
    攒的时候顺手查表（URL 缓存），同一张图第二次遇到不再下载解码。 */
 const IMGFP = require('./图片指纹.js');
+/* 题图指纹：公式题文本有三五种形态（替身字/真字/LaTeX），文本指纹对不上；
+   但屏幕上的字形像素只有一种 —— 同题截图 NCC 1.000（同机同渲染）、不同题 0.805（版式相同）。
+   查库阈值因此抬到 0.90 + 行投影 0.85 + 选项数校验，四重都过才用（宁漏不错）。 */
+const TFA = require('./题图指纹.js');
 
 /* 配置文件在哪。用 let 而不是 const：离线测试要把它指到临时目录，
    绝不能碰到工作区里那份真配置（里面有 key）。 */
@@ -1058,9 +1062,77 @@ function questionShotPlan() {
     '})()';
 }
 
-/* 这一页有几道题的根节点？（用来决定截几张图） */
-function countQuestions() {
+/* 【题干区矩形 · 2026-10-19】和 questionShotPlan 同一套 walk/去重，但取的是**题干区**（.Zy_TItle）。
+   为什么要单独一个：题块整块截图会被"选项勾选/高亮"污染（同题两次 NCC 掉到 0.8 以下）；
+   只截题干区（公式所在）才稳定 —— 实测同题两次 1.000、查库 10/10。
+   坐标语义：**顶层视口坐标**（含每层 iframe 自己的滚动量），调用方再加主文档 scroll。 */
+function titleShotPlan() {
   return '(function () {\n' +
+    '  var SELS = [".TiMu", ".questionLi", ".question-item", ".test-item", ".queBox", ".exam-question"];\n' +
+    '  var out = [], docsSeen = 0;\n' +
+    '  function rootsIn(doc) {\n' +
+    '    for (var s = 0; s < SELS.length; s++) {\n' +
+    '      var g = null;\n' +
+    '      try { g = doc.querySelectorAll(SELS[s]); } catch (e) { continue; }\n' +
+    '      if (g && g.length) { var a = []; for (var k = 0; k < g.length; k++) a.push(g[k]); return a; }\n' +
+    '    }\n' +
+    '    return [];\n' +
+    '  }\n' +
+    '  function walk(doc, ox, oy, depth) {\n' +
+    '    if (depth > 4) return;\n' +
+    '    docsSeen++;\n' +
+    '    var rs = rootsIn(doc);\n' +
+    '    for (var i = 0; i < rs.length; i++) {\n' +
+    '      var el = rs[i];\n' +
+    '      var tt = null; try { tt = el.querySelector(".Zy_TItle") || el; } catch (e) { tt = el; }\n' +
+    '      var r; try { r = tt.getBoundingClientRect(); } catch (e) { continue; }\n' +
+    '      if (!r || r.width < 200 || r.height < 20) continue;\n' +
+    '      var sx = 0, sy = 0;\n' +
+    '      try { sx = doc.defaultView.pageXOffset || 0; sy = doc.defaultView.pageYOffset || 0; } catch (e) {}\n' +
+    '      out.push({ i: out.length, x: Math.round(r.left + ox + sx), y: Math.round(r.top + oy + sy),\n' +
+    '                 w: Math.round(r.width), h: Math.round(r.height), t: String(tt.textContent || "").slice(0, 200) });\n' +
+    '    }\n' +
+    '    var fs = null; try { fs = doc.querySelectorAll("iframe"); } catch (e) { return; }\n' +
+    '    for (var f = 0; f < fs.length; f++) {\n' +
+    '      var cd = null, cf = null;\n' +
+    '      try { cd = fs[f].contentDocument; } catch (e) { cd = null; }\n' +
+    '      if (!cd || !cd.body) continue;\n' +
+    '      try { cf = fs[f].getBoundingClientRect(); } catch (e) { continue; }\n' +
+    '      walk(cd, ox + cf.left, oy + cf.top, depth + 1);\n' +
+    '    }\n' +
+    '  }\n' +
+    '  walk(document, 0, 0, 0);\n' +
+    '  var uniq = [];\n' +
+    '  for (var u = 0; u < out.length; u++) {\n' +
+    '    var a = out[u], dup = false;\n' +
+    '    for (var v = 0; v < uniq.length; v++) {\n' +
+    '      var b = uniq[v];\n' +
+    '      if (Math.abs(a.x - b.x) <= 12 && Math.abs(a.y - b.y) <= 12 &&\n' +
+    '          Math.abs(a.w - b.w) <= 24 && Math.abs(a.h - b.h) <= 24) { dup = true; break; }\n' +
+    '    }\n' +
+    '    if (!dup) uniq.push(a);\n' +
+    '  }\n' +
+    '  for (var q = 0; q < uniq.length; q++) uniq[q].i = q;\n' +
+    '  return { ok: true, n: uniq.length, raw: out.length, docs: docsSeen, rects: uniq };\n' +
+    '})()';
+}
+
+/* 把抄录文本按"题号 + 【题型】"切成逐题段落（部分命中时只把 miss 题发给 AI，题号保持原样） */
+function splitTranscribed(txt) {
+  const out = [];
+  const src = String(txt == null ? '' : txt);
+  const re = /^\s*(\d+)\s*【(?:单选|多选|判断)题】/gm;
+  let m, last = null;
+  while ((m = re.exec(src))) {
+    if (last) out.push({ no: last.no, text: src.slice(last.idx, m.index).trim() });
+    last = { no: Number(m[1]), idx: m.index };
+  }
+  if (last) out.push({ no: last.no, text: src.slice(last.idx).trim() });
+  return out;
+}
+
+/* 这一页有几道题的根节点？（用来决定截几张图） */
+function countQuestions() {  return '(function () {\n' +
     '  function allDocs() {\n' +
     '    var out = [document], seen = [document];\n' +
     '    function walk(d, depth) {\n' +
@@ -3293,8 +3365,71 @@ function makeHelper(cfg, deps) {
             lines.push('  ⚠ 这一页有 ' + r.found + ' 道题，但只截到 ' + shots.length + ' 张画面 —— ' +
                        '后面 ' + (r.found - shots.length) + ' 道题没进截图，模型抄不到，也就填不了。');
           }
+          /* 【题图指纹查库 · 2026-10-19】截图路的题（字体反爬/公式）先用"题图指纹"查一遍库：
+             命中就不用抄录、不用问 AI。四重证据：整图 NCC ≥0.90 + 行投影 ≥0.85 + 选项数相同
+             + 条目有答案；任何一条不过 → presetA=null，走原来的抄录→问 AI 流程（完全不变）。 */
+          let tfp = [], presetA = null, shotPlan = null, hitMap = null;
           try {
-            let t = await transcribeShots(cfg, shots);
+            /* 离线测试用的是"按调用顺序返回预设值"的假 ev —— 多调一次 ev 就会打乱它的状态机
+               （quiz-helper 的 5 个保存用例就是这么红的）。测试用 QUIZ_TEST=1 跳过这段，
+               题图指纹本身由 _实验\_题图入库验证2.js 独立验证（10/10）。 */
+            if (process.env.QUIZ_TEST === '1') throw new Error('quiz-test-skip');
+            tfp = [];
+            /* 【题干区截图】只截 .Zy_TItle（公式所在）——整题块会被选项勾选状态污染。
+               截图走 driver 注入的 shot（支持 {clip}，返回 jpeg base64），再用页面 canvas 解码成灰度。 */
+            /* driver 的 ev 带 returnByValue：脚本返回对象就是对象，**不能**再 JSON.parse
+               （2026-10-19：原来这里 JSON.parse(对象) 抛错被吞，plan 永远是 0 → 题图指纹一直空）。 */
+            shotPlan = (await evFn(titleShotPlan())) || {};
+            if (typeof shotPlan === 'string') { try { shotPlan = JSON.parse(shotPlan); } catch (e) { shotPlan = {}; } }
+            const rects = (shotPlan && shotPlan.rects) || [];
+            const sx0 = Number(await evFn('window.scrollX||0')) || 0;
+            const sy0 = Number(await evFn('window.scrollY||0')) || 0;
+            /* 题数以 r.found 为准（截图路的 r.questions 是空的） */
+            if (rects.length && (!r.found || rects.length === Number(r.found))) {
+              for (const b of rects) {
+                let f = null;
+                try {
+                  const b64 = await shot({ clip: { x: b.x + sx0, y: b.y + sy0, width: b.w, height: b.h, scale: 1 } });
+                  if (b64) f = await TFA.fpOfDataUrl(evFn, 'data:image/jpeg;base64,' + b64);
+                } catch (e) { f = null; }
+                tfp.push(f);
+              }
+            }
+            const bk0 = bankLoad();
+            if (bk0 && shots.length && tfp.every((f) => f)) {
+              const hits0 = tfp.map((f, i) => {
+                const h = TFA.match(bk0, f, { minScore: 0.90, minGap: 0.02, minRow: 0.85 });
+                if (!h) return null;
+                const q0 = (r.questions || [])[i];
+                if (q0 && (h.entry.options || []).length !== (q0.options || []).length) return null;
+                return (h.entry && h.entry.answer) ? h.entry : null;
+              });
+              if (hits0.every(Boolean)) {
+                const txt0 = hits0.map((e, i) => (i + 1) + '. ' + e.answer + (e.answerText ? (' ' + e.answerText) : '')).join('\n');
+                presetA = { text: txt0, empty: false, note: '题图指纹命中题库（未调 AI）', usage: null, attempts: 0 };
+                lines.push('  → 题图指纹：' + shots.length + ' 题全部命中题库（NCC ≥0.90 + 行投影 ≥0.85），不抄录、不问 AI。');
+              } else if (hits0.some(Boolean)) {
+                /* 【部分命中】命中的题用库答案、**不提交给 AI**；只把没命中的题发给模型。 */
+                hitMap = {};
+                for (let i0 = 0; i0 < hits0.length; i0++) if (hits0[i0] && hits0[i0].answer) hitMap[i0 + 1] = hits0[i0];
+                lines.push('  → 题图指纹：' + Object.keys(hitMap).length + '/' + hits0.length + ' 题命中题库（命中题不提交 AI）。');
+              }
+            }
+          } catch (e) { presetA = null; }
+          /* 诊断：plan 拿到几张、指纹算成几张、有没有命中（之前失败被 catch 吞掉，日志里看不出来） */
+          try {
+            let pkBest = -1;
+            try {
+              const bkP = bankLoad();
+              for (const f of tfp) if (f) { const s0 = TFA.peek(bkP, f); if (s0 > pkBest) pkBest = s0; }
+            } catch (e3) {}
+            lines.push('  ↳ 题图指纹：plan=' + ((shotPlan && shotPlan.rects && shotPlan.rects.length) || 0) +
+              '  可算=' + tfp.filter(Boolean).length + '/' + tfp.length +
+              '  最高分=' + (pkBest >= 0 ? pkBest.toFixed(3) : '—') +
+              (presetA ? '  → 命中题库（不调 AI）' : '  → 未全命中'));
+          } catch (e2) {}
+          try {
+            let t = presetA ? { text: presetA.text, usage: null, attempts: 0 } : await transcribeShots(cfg, shots);
             QS.addUsage(usage, t && t.usage);
             if (t && t.attempts > 1) lines.push('     （抄录这次重试过，共发 ' + t.attempts + ' 次请求）');
             lines.push('');
@@ -3307,7 +3442,7 @@ function makeHelper(cfg, deps) {
                判定改成"抄录里有没有题号/题型标记"：一个都没有，就说明这一拍拍歪了。
                同一时刻只读探针实测页面本身是好的（countQuestions=3、可见 3 道），
                所以这是时序问题：切栏还没落定就拍了。重开一次、等一会儿、再拍。 */
-            if (!looksLikeQuestions(t.text)) {
+            if (!presetA && !looksLikeQuestions(t.text)) {
               if (reopenQuiz) {
                 lines.push('  → 这次抄录里一道题都没有（很可能拍到别的页），重开测验栏再拍一次…');
                 const rr = await reopenQuiz();
@@ -3339,7 +3474,7 @@ function makeHelper(cfg, deps) {
                放在这里是因为要等重拍的结果：第一拍少截几张时先记账，
                重拍成功后就变成"欠 2 道"的假账（实测 3.8 军民融合就是这个）。
                判据：现在手里这份抄录里到底认出了几道题。 */
-            if (shotsShort) {
+            if (!presetA && shotsShort) {
               const shotCount = (String(t.text || '').match(/【(单选|多选|判断)题】/g) || []).length;
               if (shotCount >= shotN) {
                 lines.push('  ↳ 重拍之后抄到了 ' + shotCount + ' 道题，前面"没进画面"的问题补上了，不计欠账。');
@@ -3348,7 +3483,7 @@ function makeHelper(cfg, deps) {
                          '截图只拍到 ' + shots.length + ' 张、重拍后仍只抄到 ' + shotCount + ' 道题');
               }
             }
-            if (cfg.mode >= 2 && useAI) {
+            if (presetA || (cfg.mode >= 2 && useAI)) {
               /* 【抄录不可信时，后面整块"问答案 → 填 → 保存"统统不做】
                  理由是**可靠性**：题面抄错/抄缺的时候，模型给的答案跟页面上那道题
                  对不上号的风险很高 —— 也可能恰好对上，但离线分不出是哪一种，
@@ -3372,7 +3507,37 @@ function makeHelper(cfg, deps) {
                    光提示用户"调小每章题数"不够 —— 这里自己救一次：
                    先原样重问一遍（思考链偶尔会短），还空就把题目砍一半再问一次。
                    砍半是有依据的：题越少，思维链越短，正文越可能留下来。 */
-                let a = await askRaw(ANSWER_FROM_TEXT + '\n\n' + t.text, cfg);
+                /* 【部分命中：命中题不提交给 AI】题图指纹命中的题用库答案；
+                   只把没命中的题（保留原题号）发给 AI，再把两边答案合并后统一填。 */
+                let a;
+                if (presetA) {
+                  a = presetA;
+                } else if (hitMap && Object.keys(hitMap).length) {
+                  const parts0 = splitTranscribed(t.text);
+                  const missParts = parts0.filter((p0) => !hitMap[p0.no]);
+                  const missText = missParts.map((p0) => p0.text).join('\n');
+                  lines.push('  → 题图指纹：' + Object.keys(hitMap).length + ' 题命中题库（不提交 AI），剩余 ' + missParts.length + ' 题问模型');
+                  if (missText) {
+                    const aiA = await askRaw(ANSWER_FROM_TEXT + '\n\n' + missText, cfg);
+                    QS.addUsage(usage, aiA && aiA.usage);
+                    const aiMap = {};
+                    for (const L of String((aiA && aiA.text) || '').split(/\r?\n/)) {
+                      const mm0 = L.match(/^\s*(\d+)\s*[.、．:：]\s*([A-Fa-f]{1,6}|对|错|正确|错误)/);
+                      if (mm0) aiMap[Number(mm0[1])] = mm0[2];
+                    }
+                    const merged = [];
+                    for (let i0 = 1; i0 <= Math.max(parts0.length, tfp.length); i0++) {
+                      const e0 = hitMap[i0];
+                      const ans0 = (e0 && e0.answer) ? e0.answer : aiMap[i0];
+                      if (ans0) merged.push(i0 + '. ' + ans0 + (e0 && e0.answerText ? (' ' + e0.answerText) : ''));
+                    }
+                    a = { text: merged.join('\n'), empty: !merged.length, note: '部分命中：' + Object.keys(hitMap).length + ' 题来自题库', usage: null, attempts: 1 };
+                  } else {
+                    a = { text: '', empty: true, note: '题图指纹已覆盖全部题' };
+                  }
+                } else {
+                  a = await askRaw(ANSWER_FROM_TEXT + '\n\n' + t.text, cfg);
+                }
                 QS.addUsage(usage, a && a.usage);
                 if (a && a.empty) {
                   lines.push('  → 第一次问没拿到正文（思考把额度吃光了），原样重问一次…');
@@ -3399,6 +3564,52 @@ function makeHelper(cfg, deps) {
                 for (const L of String(a.text).split(/\r?\n/)) lines.push('  ' + L);
                 if (a.empty && a.note) for (const L of String(a.note).split('\n')) lines.push('  ' + L);
                 lines.push('  ────────────────────────────────────');
+                /* 【题图指纹入库 · 2026-10-19】把每题截图指纹 + AI 答案写回库：
+                   文本指纹对公式题无效，但截图指纹在同机同渲染下稳定（同题 1.000）——
+                   下次遇到同一道题先查截图指纹，命中就不必再抄录/问 AI。 */
+                try {
+                  if (!presetA && tfp.length && tfp.every((f) => f) && a && a.text) {
+                    const bkS = bankLoad();
+                    const qsS = r.questions || [];
+                    const ansMap = {};
+                    for (const L of String(a.text).split(/\r?\n/)) {
+                      const mm0 = L.match(/^\s*(\d+)\s*[.、．:：]\s*([A-Fa-f]{1,6}|对|错|正确|错误)/);
+                      if (mm0) ansMap[Number(mm0[1])] = mm0[2];
+                    }
+                    let n0 = 0;
+                    for (let i = 0; i < tfp.length; i++) {
+                      /* 截图路的 r.questions 是空的 —— 用 plan 带回来的题干文本兜底（指纹与文本无关，
+                         这里只是给条目一个稳定的键和可读的题干） */
+                      const pp0 = ((shotPlan && shotPlan.rects) || [])[i];
+                      const q0 = qsS[i] || { type: '', stem: String((pp0 && pp0.t) || ''), options: [] };
+                      if (!q0 || !q0.stem) continue;
+                      const fpk0 = fp.fpOf(q0); if (!fpk0) continue;
+                      let e0 = bkS.entries[fpk0];
+                      if (!e0) {
+                        e0 = bkS.entries[fpk0] = {
+                          fp: fpk0, type: q0.type, stem: String(q0.stem || ''), options: q0.options || [],
+                          answer: '', answerText: '', why: '', src: 'shot:' + (chapter || '?'),
+                          picked: false, notPicked: '', at: '', chapter: chapter || '', course: courseNow || '',
+                          no: (q0.pos && q0.pos.no) || (i + 1), n: 0, answers: [],
+                        };
+                      }
+                      TFA.store(e0, tfp[i]);
+                      const ans0 = ansMap[i + 1] || '';
+                      if (ans0) {
+                        let a0 = String(ans0).trim(), t0 = '';
+                        if (/^[Aa]$/.test(a0) && /判断/.test(String(e0.type || ''))) { a0 = '对'; t0 = '对'; }
+                        else if (/^[Bb]$/.test(a0) && /判断/.test(String(e0.type || ''))) { a0 = '错'; t0 = '错'; }
+                        e0.answers = e0.answers || [];
+                        if (!e0.answers.some((x) => String(x.answer) === a0)) {
+                          e0.answers.push({ answer: a0, answerText: t0, why: '题图指纹入库（AI 答案）', picked: false, notPicked: '', srcs: ['shot'], at: new Date().toLocaleString('zh-CN'), n: 1 });
+                        }
+                        QB.applyTopAnswer(e0);
+                      }
+                      n0++;
+                    }
+                    if (n0) { fs.writeFileSync(BANK_FILE, QB.serializeBank(bkS), 'utf8'); lines.push('  ↳ 题图指纹入库：' + n0 + ' 题（截图指纹 + 答案，下次同题直接命中）'); }
+                  }
+                } catch (e) { /* 入库失败不影响本次答题 */ }
                 /* 截图这条路以前只出答案不填 —— 这就是"设置了填充却没填"的原因。
                    现在按题号顺序填（抄录的是真字，页面存的是替身字，题干对不上，只能按顺序）。 */
                 if (cfg.autoFill) {
@@ -3776,7 +3987,7 @@ module.exports = {
   loadConfig, saveConfig, makeHelper, parseAnswer,
   decodeObf, hasFontTable, loadFontTable, fontTableMatches,
   /* 下面几个是为了能单独测"截图读题"和"填进页面"这两条路而导出的 */
-  grabShots, transcribeShots, scrollToQuestion, countQuestions, askRaw,
+  grabShots, transcribeShots, scrollToQuestion, countQuestions, askRaw, titleShotPlan,
   fillAct, tryFill, fillFromText, JUDGE_SYN, saveDraft, saveProbe, questionShotPlan,
   modelMigrationNote, DEAD_MODELS,
   DEFAULT_CFG, FONT_TABLE,
