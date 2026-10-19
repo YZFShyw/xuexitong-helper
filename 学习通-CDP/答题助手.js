@@ -1089,7 +1089,10 @@ function titleShotPlan() {
     '      if (!r || r.width < 200 || r.height < 20) continue;\n' +
     '      var sx = 0, sy = 0;\n' +
     '      try { sx = doc.defaultView.pageXOffset || 0; sy = doc.defaultView.pageYOffset || 0; } catch (e) {}\n' +
-    '      out.push({ i: out.length, x: Math.round(r.left + ox + sx), y: Math.round(r.top + oy + sy),\n' +
+    '      /* 坐标语义：**视口坐标**（每层 iframe 的滚动已含在 getBoundingClientRect 里，不再重复加）；\n' +
+    '         调用方只再加主文档 scroll —— 与验证脚本完全一致。原来多加了每层 pageOffset，\n' +
+    '         调用方又加一次主文档 scroll，滚动量算两遍 → 运行时只命中视口附近那一题（1/10）。 */\n' +
+    '      out.push({ i: out.length, x: Math.round(r.left + ox), y: Math.round(r.top + oy),\n' +
     '                 w: Math.round(r.width), h: Math.round(r.height), t: String(tt.textContent || "").slice(0, 200) });\n' +
     '    }\n' +
     '    var fs = null; try { fs = doc.querySelectorAll("iframe"); } catch (e) { return; }\n' +
@@ -1121,13 +1124,15 @@ function titleShotPlan() {
 function splitTranscribed(txt) {
   const out = [];
   const src = String(txt == null ? '' : txt);
-  const re = /^\s*(\d+)\s*【(?:单选|多选|判断)题】/gm;
+  /* 题号可有可无（抄录模型有时不写，17:21 实测就是这样）——按【题型】切，题号按顺序补；
+     调用方把题号重新写回 missText，AI 才会按原题号作答。 */
+  const re = /【(?:单选|多选|判断)题】/g;
   let m, last = null;
   while ((m = re.exec(src))) {
-    if (last) out.push({ no: last.no, text: src.slice(last.idx, m.index).trim() });
-    last = { no: Number(m[1]), idx: m.index };
+    if (last) out.push({ no: out.length + 1, text: src.slice(last, m.index).trim() });
+    last = m.index;
   }
-  if (last) out.push({ no: last.no, text: src.slice(last.idx).trim() });
+  if (last != null) out.push({ no: out.length + 1, text: src.slice(last).trim() });
   return out;
 }
 
@@ -3386,10 +3391,17 @@ function makeHelper(cfg, deps) {
             const sy0 = Number(await evFn('window.scrollY||0')) || 0;
             /* 题数以 r.found 为准（截图路的 r.questions 是空的） */
             if (rects.length && (!r.found || rects.length === Number(r.found))) {
-              for (const b of rects) {
+              for (let i0 = 0; i0 < rects.length; i0++) {
+                const b = rects[i0];
                 let f = null;
                 try {
-                  const b64 = await shot({ clip: { x: b.x + sx0, y: b.y + sy0, width: b.w, height: b.h, scale: 1 } });
+                  /* 【先滚进视口再截】captureBeyondViewport 在部分版本/页面上只截得到视口附近
+                     （实测 1/10 → 4/10），而验证脚本"滚动后截"是 10/10 —— 这里照做。 */
+                  try { await evFn(scrollToQuestion(i0)); } catch (e0) {}
+                  await new Promise((r2) => setTimeout(r2, 220));
+                  /* captureBeyondViewport：driver 不滚动页面，多数题块在视口外；
+                     不开这个，Chrome 只截视口内 → 视口外全白 → 只有视口里那 1 题命中（1/10）。 */
+                  const b64 = await shot({ clip: { x: b.x + sx0, y: b.y + sy0, width: b.w, height: b.h, scale: 1 }, captureBeyondViewport: true });
                   if (b64) f = await TFA.fpOfDataUrl(evFn, 'data:image/jpeg;base64,' + b64);
                 } catch (e) { f = null; }
                 tfp.push(f);
@@ -3515,7 +3527,8 @@ function makeHelper(cfg, deps) {
                 } else if (hitMap && Object.keys(hitMap).length) {
                   const parts0 = splitTranscribed(t.text);
                   const missParts = parts0.filter((p0) => !hitMap[p0.no]);
-                  const missText = missParts.map((p0) => p0.text).join('\n');
+                  /* 题号写回（AI 按原题号作答；部分命中时只发这些题） */
+                  const missText = missParts.map((p0) => p0.no + '. ' + p0.text).join('\n');
                   lines.push('  → 题图指纹：' + Object.keys(hitMap).length + ' 题命中题库（不提交 AI），剩余 ' + missParts.length + ' 题问模型');
                   if (missText) {
                     const aiA = await askRaw(ANSWER_FROM_TEXT + '\n\n' + missText, cfg);
