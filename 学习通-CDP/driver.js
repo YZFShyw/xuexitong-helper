@@ -302,6 +302,11 @@ const holdGlitchLogged = Object.create(null); /* "采样毛刺"日志每章只�
     —— 主作用域里的 videoProgressProbe() 负责探，结果作为第三个参数传进来 ✓ */
 async function holdForPendingMedia(s, why, vp) {
   if (holdGateDisabled()) return false;
+  /* 【目录已标"已完成" ⇒ 绝不为任务点回头重播】（2026-10-19 实测 3.6.1 函数微分）
+     目录条目明写"已完成"（catalogDone=true），但 taskStats.pending 仍是 1（平台任务点没标），
+     于是被"回去把它点开"拉起重播 1166 秒的视频 —— 纯浪费。
+     目录标记是最终判据（见 probe 里 1453 行注释），这里直接放行翻页。 */
+  if (s && s.catalogDone) return false;
   if (!mediaHoldNeeded(s)) return false;
   const ch = (s && s.chapter) || '';
   const used = holdRounds[ch] || 0;
