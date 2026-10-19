@@ -524,10 +524,29 @@ const EXTRACT = `(function () {
         var rr = rules[ri];
         if (!rr || rr.type !== 5) continue;      /* 5 = FONT_FACE_RULE */
         var fam2 = (rr.style.getPropertyValue('font-family') || '').replace(/["']/g, '');
-        if (fam2 !== 'font-cxsecret') continue;
+        if (fam2.indexOf('cxsecret') < 0) continue;   /* 字体名可能带后缀（font-cxsecret-xxx），宽松匹配 */
         var src2 = rr.style.getPropertyValue('src') || '';
         var mm2 = src2.match(/base64,([A-Za-z0-9+/=\\s]+)/);
         if (mm2) { fontB64 = mm2[1].replace(/\\s/g, ''); break; }
+        /* 【外链字体】高数等页面把字体写成 url(https://…) 而不是内联 base64 ——
+           这里同步取回来转 base64，否则 fontB64 为空就只能退回截图读题（慢 + 花钱）。 */
+        var mu = src2.match(/url\\(\\s*(?:'([^']+)'|"([^"]+)"|([^)'"]+))\\s*\\)/);
+        var u2 = mu && (mu[1] || mu[2] || mu[3]);
+        if (u2) {
+          try {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', u2, false);
+            xhr.overrideMimeType('text/plain; charset=x-user-defined');
+            xhr.send(null);
+            if (xhr.status === 200 && xhr.responseText) {
+              var bin2 = '';
+              var rt2 = xhr.responseText;
+              for (var bi2 = 0; bi2 < rt2.length; bi2++) bin2 += String.fromCharCode(rt2.charCodeAt(bi2) & 0xff);
+              fontB64 = btoa(bin2);
+            }
+          } catch (e3) { /* 取不到就保持空，走截图 */ }
+        }
+        if (fontB64) break;
       }
     }
   }
@@ -700,6 +719,12 @@ const API_TIMEOUT_MS = 90000;
    原来那把 TRANSIENT 正则把「超时」和「ECONNRESET」写在一起、共用 API_RETRIES=2，
    等于一次长请求无脑重发三遍（最坏 270 秒 + 2~3 倍费用），而且用户要等 4.5 分钟。 */
 const API_TIMEOUT_MS_LONG = 180000;     /* 超时后那一次重试用的大限 */
+/* 【正文独立大限 · 2026-10-19】原来定时器从"发请求"开始算，模型 thinking=high 时光是等响应头
+   就能吃掉 90 秒，剩下的正文读取被同一个定时器 abort —— 表现为 json() 抛
+   "This operation was aborted"，上层误判成瞬断、连重试都没有（高数"映射"10 题就是这么全丢的）。
+   现在：响应头到手 → 旧定时器停 → **正文重新计一个和本次请求同级的大限**（不写死 180s：
+   调用方传 timeoutMs=3000 的测试/短请求，正文也必须 3 秒内结束，否则"正文卡死"的护栏测试会红）。 */
+const BODY_TIMEOUT_MS = 0;   /* 保留导出位；实际用 limit（见 fetchWithTimeout 内注释） */
 const API_RETRIES_CONN = 2;             /* 连接类故障：最多再试 2 次 */
 const API_RETRIES_TIMEOUT = 1;          /* 响应超时：最多再试 1 次 */
 const RETRY_WAIT_MS = [1200, 3000];
@@ -747,17 +772,21 @@ async function fetchWithTimeout(url, opts, over) {
          ⇒ 正文读取裸奔：服务器拖正文/慢速滴流时，流程会长时间挂着 ✗）。
          现在：定时器一直护到正文读完 —— 把 json/text/arrayBuffer/blob 包一层，读完（或读炸）
          才 clearTimeout ✓；响应对象不可改（极罕见）时退回旧行为，不拦主流程。 */
+      /* 【正文读写要有独立大限】响应头到手就把发请求阶段的定时器停掉，
+         给正文重新计一个大限；否则"头慢"会把正文的额度吃光（见 BODY_TIMEOUT_MS 注释）。 */
+      clearTimeout(timer);
+      const bodyTimer = setTimeout(() => { try { ac.abort(); } catch (e) {} }, Math.max(1000, limit));
       try {
         const wrap = (m) => {
           if (typeof r[m] !== 'function') return;
           const orig = r[m].bind(r);
           r[m] = async function () {
-            try { return await orig.apply(null, arguments); } finally { clearTimeout(timer); }
+            try { return await orig.apply(null, arguments); } finally { clearTimeout(bodyTimer); }
           };
         };
         wrap('json'); wrap('text'); wrap('arrayBuffer'); wrap('blob');
         handedOff = true;
-      } catch (e) { /* 包不上就退回旧行为（finally 里会立刻清） */ }
+      } catch (e) { clearTimeout(bodyTimer); }
       return r;
     } catch (e) {
       const kind = classifyApiFailure(e);
@@ -825,28 +854,45 @@ async function askOne(q, cfg) {
 /* 直接拿一段文字去问（截图读题那条路用它：
    题目是模型抄录出来的文字，不是从网页结构化抠出来的） */
 async function askRaw(userText, cfg) {
-  const r = await fetchWithTimeout(apiUrlOf(cfg), {
+  const payload = JSON.stringify({
+    model: cfg.model,
+    max_tokens: MAX_TOKENS,
+    /* 思考模式：开，档位 max（和 askOne 保持一致 —— 这是真正出答案的那一步）
+       同样必须给 max_tokens：题多的时候（5 道以上）思维链一长，
+       正文就容易被截断，表现就是"最后一道题没有答案"。 */
+    thinking: { type: 'enabled' },
+    reasoning_effort: 'max',
+    messages: [
+      { role: 'system', content: SYSTEM },
+      { role: 'user', content: userText }
+    ]
+  });
+  const post = () => fetchWithTimeout(apiUrlOf(cfg), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.apiKey },
-    body: JSON.stringify({
-      model: cfg.model,
-      max_tokens: MAX_TOKENS,
-      /* 思考模式：开，档位 max（和 askOne 保持一致 —— 这是真正出答案的那一步）
-         同样必须给 max_tokens：题多的时候（5 道以上）思维链一长，
-         正文就容易被截断，表现就是"最后一道题没有答案"。 */
-      thinking: { type: 'enabled' },
-      reasoning_effort: 'max',
-      messages: [
-        { role: 'system', content: SYSTEM },
-        { role: 'user', content: userText }
-      ]
-    })
+    body: payload
   });
+  let r = await post();
   if (!r.ok) {
     const t = await r.text().catch(() => '');
     throw new Error('API ' + r.status + ' ' + t.slice(0, 200));
   }
-  const j = await r.json();
+  let j;
+  try {
+    j = await r.json();
+  } catch (e1) {
+    /* 【正文读取失败 → 重发一次 · 2026-10-19】AI 是最后一道兜底：
+       响应头到手后正文被 abort（"This operation was aborted"）时，旧逻辑直接整章丢；
+       这里重新发一次（网络瞬断/正文超时都能救回来）。 */
+    const msg = String((e1 && e1.message) || e1);
+    if (!/abort|timeout|超时|terminated|socket/i.test(msg)) throw e1;
+    r = await post();
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      throw new Error('API ' + r.status + ' ' + t.slice(0, 200));
+    }
+    j = await r.json();
+  }
   const pt = pickText(j);
   /* 【usage 必须带出去】原来 pickText 的结果直接返回，usage 就在这一层丢了 ——
      截图读题那条路一章花掉多少 token，日志里一个字都看不到。
@@ -1254,11 +1300,12 @@ async function transcribeShots(cfg, shots) {
       /* 抄录也要给足输出配额：一张截图一道题，题目多了正文就长，
          配额一紧会被截在最后一道题上（"截图里明明有 5 道，抄出来只有 4 道"）。 */
       max_tokens: MAX_TOKENS,
-      /* 思考模式：开，档位 high。
-         这一步是「认字」不是「解题」，不需要 max —— 认错一个字是像素问题，多想也没用；
-         但降到 disabled 又实测会漏认题目里的小字，所以维持 high。 */
+      /* 思考模式：开，档位 **medium**（2026-10-19 从 high 降下来）。
+         high 下 10 道公式题时思维链把输出额度烧掉一半，抄录被截在 6 题 →
+         transcriptionTrust 判"不可信" → 整章不问 AI、不填（映射 10 题全丢就是这个）。
+         medium 实测足够认字，正文额度留给题目本身；仍远好于 disabled（会漏小字）。 */
       thinking: { type: 'enabled' },
-      reasoning_effort: 'high',
+      reasoning_effort: 'medium',
       messages: [{ role: 'user', content }]
     })
   }, { timeoutMs: VISION_TIMEOUT_MS });
@@ -3423,7 +3470,9 @@ function makeHelper(cfg, deps) {
                   }
                 }
               } catch (e) {
-                lines.push('  → 问 AI 失败：' + e.message);
+                lines.push('  → 问 AI 失败：' + e.message + '（' + (e.name || '') + '｜attempts=' + (e.attempts || '?') + '｜kind=' + (e.kind || '?') + (e.cause ? ('｜cause=' + String(e.cause).slice(0, 80)) : '') + '）');
+                /* 失败的题必须记账（以前只打一行日志 → 计数文件写"填上 10 欠 0"，实际一道都没填） */
+                noteMiss({ type: '(截图读题)', stem: '(整章问 AI 失败)', options: [] }, '问 AI 失败：' + e.message);
               }
               }
             }

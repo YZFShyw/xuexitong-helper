@@ -4195,6 +4195,9 @@ const DOC_STEP = `(function(){
        （2026/9/26 22:42 那次卡了 5 分钟以上，根因就是某个 continue 不推进状态）。
        这里主动喊出来，并强制走翻页，别让它无声地转。 */
     {
+      /* 【答题期间喂饱零推进计时器】2026-10-19：映射那章 10 题（截图+抄录+问 AI 要 100+ 秒）
+         被 90 秒看门狗强推走、答题过程整段丢弃 —— 这就是"明明有题却 0 命中"的另一半原因。 */
+      if (quizBusy) { lastProgressAt = Date.now(); }
       const idleMs = Date.now() - lastProgressAt;
       if (idleMs > 90000) {
         log('⚠ 已经 ' + Math.round(idleMs / 1000) + ' 秒没有任何进展（最后一步：' +
