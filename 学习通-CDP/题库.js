@@ -210,7 +210,10 @@ function parseRecord(text) {
     /* 【课程头】块头下面一行 `课程：军事理论`（2026-10-12 起运行时才写）。
        有了它才能"按课程分库"—— 老记录没有这一行 ⇒ course 为空 ⇒ 那些条目仍旧进主库（不迁移）。 */
     if ((m = line.match(RE.course))) {
-      course = m[1].trim();
+      const nm = m[1].trim();
+      /* 【脏课程名】历史上有过一次把对象直接拼进"课程："行（记录里真出现过 [object Object]）。
+         这种不是课程名 —— 当空处理，免得它污染分库和位置键。 */
+      course = (/^\[object /.test(nm) || nm === 'undefined' || nm === 'null') ? '' : nm;
       continue;
     }
     /* 运行时留下的指纹标记（在章节头之后、题块之内） */
@@ -325,12 +328,17 @@ function makeEntryBuilder(opts) {
       e = entries[fp] = {
         fp, type, stem, options,
         answer: '', answerText: '', why: '', src: '', picked: false, notPicked: '',
-        at: q.at || '', chapter: q.chapter || '', n: 0, answers: []
+        at: q.at || '', chapter: q.chapter || '', course: q.course || '',
+        no: (q.no == null || q.no === '' ? 0 : Number(q.no) || 0),
+        n: 0, answers: []
       };
       if (fpAlt) e.fpAlt = fpAlt;
       if (fpOrder) e.fpOrder = fpOrder;
       if (isDom) stats.fromDom++; else stats.fromTranscribe++;
     } else {
+      /* 【位置字段】同一指纹合并时也要把课程/题号补上（旧条目先到的可能是空） */
+      if (!e.course && q.course) e.course = q.course;
+      if (!e.no && q.no != null && q.no !== '' && (Number(q.no) || 0) > 0) e.no = Number(q.no) || 0;
       stats.merged++;
     }
     if (q.obfNoLetter || options.some((x) => !x.letter)) e.noLetter = true;
@@ -713,6 +721,30 @@ function lazyIndex(bankOut, name, build) {
   });
 }
 
+/* 【位置键 · 2026-10-19】课程 + 章节 + 题号 —— "同一门课同一章的第 N 题"就是同一道题。
+   只在**三项齐全且索引唯一**时收录；撞多条整组不收录（宁漏不错）。
+   注意：旧库没有 course/no 的条目不会被收录 —— 不满足的不影响原来的任何判定。 */
+const POS_NORM = (s) => String(s == null ? '' : s).replace(/[\s\u3000]+/g, '').replace(/^[0-9]+([.．、)）])?/, '');
+function posKeyOf(course, chapter, no) {
+  const c = POS_NORM(course), ch = POS_NORM(chapter), n = String(Number(no) || 0);
+  if (!c || !ch || n === '0') return '';
+  return c + '|' + ch + '|' + n;
+}
+function buildPosIndex(entries) {
+  const idx = {};
+  const dup = {};
+  for (const k of Object.keys(entries || {})) {
+    const e = entries[k];
+    if (!e) continue;
+    const pk = posKeyOf(e.course, e.chapter, e.no);
+    if (!pk) continue;
+    if (idx[pk] && idx[pk] !== k) { dup[pk] = true; continue; }
+    idx[pk] = k;
+  }
+  for (const pk of Object.keys(dup)) delete idx[pk];
+  return idx;
+}
+
 function parseBank(raw) {
   const empty = { version: BANK_VERSION, builtAt: '', source: '', stats: {}, entries: {} };
   const txt = String(raw == null ? '' : raw).replace(/^\uFEFF/, '').trim();
@@ -769,6 +801,7 @@ function parseBank(raw) {
   };
   lazyIndex(bankOut, 'loose', buildLooseIndex);
   lazyIndex(bankOut, 'prefix', buildPrefixIndex);
+  lazyIndex(bankOut, 'pos', buildPosIndex);
   /* 【读进来就统一判断题口径】本地老条目里可能还是 `answer=B`（选项 A.对/B.错）——
      不归一的话，跟"别人码里的 错"一比就是**假冲突**（实测过）。见 normalizeBankJudgments。 */
   normalizeBankJudgments(bankOut);
@@ -870,7 +903,7 @@ function lookup(bank, fpKey, type, q) {
   const ord = (bank && bank.order) || null;
   let key = fpKey;
   let e = ent[key] || null;
-  let viaAlias = false, viaOrder = false, viaLoose = false, viaPrefix = false;
+  let viaAlias = false, viaOrder = false, viaLoose = false, viaPrefix = false, viaPos = false;
   if (!e && idx) {
     /* 库里可能只有"另一种题号"的那一份 —— 通过别名索引倒着找回来 */
     const back = idx[fpKey];
@@ -899,12 +932,26 @@ function lookup(bank, fpKey, type, q) {
     const back = lk ? bank.loose[lk] : '';
     if (back && ent[back]) { e = ent[back]; key = back; viaLoose = true; }
   }
+  if (!e && q && bank && bank.pos && q.pos) {
+    /* 【位置键兜底 · 2026-10-19】课程+章节+题号唯一命中，再要"选项数相同 + 题干前 12 字相同"。
+       三条都过才用；任何一条不过 → 当作没命中（原来的判定完全不受影响）。 */
+    const pk = posKeyOf(q.pos.course, q.pos.chapter, q.pos.no);
+    const back = pk ? bank.pos[pk] : '';
+    if (back && ent[back]) {
+      const ce = ent[back];
+      const sameOpts = (ce.options || []).length === (q.options || []).length;
+      const stemOf = (x) => (Array.isArray(x) ? x.join('') : String(x == null ? '' : x));
+      const a = LOOSE_FPR.normalizeForFp(stemOf(ce.stem)).slice(0, 12);
+      const b = LOOSE_FPR.normalizeForFp(stemOf(q.stem)).slice(0, 12);
+      if (sameOpts && a && a === b) { e = ce; key = back; viaPos = true; }
+    }
+  }
   if (!e) return null;
   if (String(e.type || '') !== String(type || '')) return null;
   if (!e.answer) return null;
   const trust = trustOf(e);
   return {
-    fp: key, entry: e, viaAlias: viaAlias, viaOrder: viaOrder, viaLoose: viaLoose, viaPrefix: viaPrefix,
+    fp: key, entry: e, viaAlias: viaAlias, viaOrder: viaOrder, viaLoose: viaLoose, viaPrefix: viaPrefix, viaPos: viaPos,
     answer: e.answer, answerText: e.answerText || '', why: e.why || '',
     picked: !!e.picked, trust: trust, trustLabel: TRUST_LABEL[trust] || trust,
     conflict: !!e.conflict,
@@ -1005,7 +1052,8 @@ function mergeBank(base, incoming, opts) {
       out.entries[k] = {
         fp: k, type: e.type, stem: e.stem || '', options: e.options || [],
         answer: inAns, answerText: inTxt, why: e.why || '',
-        picked: !!e.picked, notPicked: '', at: '', chapter: '', n: e.n || 1,
+        picked: !!e.picked, notPicked: '', at: '', chapter: e.chapter || '',
+        course: e.course || '', no: (e.no == null || e.no === '' ? 0 : Number(e.no) || 0), n: e.n || 1,
         answers: [{ answer: inAns, answerText: inTxt, why: e.why || '', picked: !!e.picked, notPicked: '', srcs: [tag], at: '', n: e.n || 1 }]
       };
       if (e.conflict) out.entries[k].conflict = true;
@@ -1052,6 +1100,10 @@ function mergeBank(base, incoming, opts) {
     /* 条目级票数也一样：合并**不加**（n 只统计本地观察） */
     if (e.fpAlt && !cur.fpAlt && e.fpAlt !== k) cur.fpAlt = e.fpAlt;   /* 别名键：有就补上 */
     if (e.fpOrder && !cur.fpOrder && e.fpOrder !== k) cur.fpOrder = e.fpOrder;
+    /* 【位置键字段：老条目靠合并升级】course/no/chapter 缺了才补，绝不覆盖已有值 */
+    if (!cur.course && e.course) cur.course = e.course;
+    if (!cur.no && e.no) cur.no = Number(e.no) || 0;
+    if (!cur.chapter && e.chapter) cur.chapter = e.chapter;
     if (e.images && e.images.length) {
       const im = (cur.images = cur.images || []);
       for (const s of e.images) if (im.indexOf(s) < 0 && im.length < 8) im.push(s);
@@ -2236,6 +2288,8 @@ module.exports = {
   exportBank, mergeBank, lookup, trustOf, TRUST_LABEL,
   /* 待补答案回填要用：把新答案设为默认（排序规则不变） */
   applyTopAnswer,
+  /* 位置键（课程+章节+题号）——测试与调试用 */
+  posKeyOf,
   /* 宽松键（同题不同写法）：查库兜底 + 建库补答案（2026-10-18） */
   fillAnswersByLoose, looseGroups,
   /* 已完成页面：读平台写出来的正确答案（stemKey 是"题干桥"，只做对应，不当主键） */

@@ -1520,3 +1520,51 @@ test('前缀键：选项集合不同 → 不命中（选项必须逐字相同）
   assert.equal(QB.lookup(bank, '', '单选', page), null, '选项不同必须拒绝');
 });
 
+
+/* ---------------- 位置键：课程+章节+题号（2026-10-19，最后一道兜底） ---------------- */
+
+const posEntry = (k, stem, ans) => Object.assign(mkOne(k, stem, ans), {
+  course: '军事理论', chapter: '7 中国古代国防工程建设', no: 3,
+});
+
+test('位置键：同位置唯一 + 选项数相同 + 题干前 12 字相同 → 命中（viaPos）', () => {
+  const k = 'e'.repeat(32);
+  const longStem = '这是一道很长的题目' + 'Z'.repeat(30);
+  const bank = bankFromEntries({ [k]: posEntry(k, longStem, 'A') });
+  const page = {
+    type: '单选',
+    stem: '这是一道很长的题目' + 'Z'.repeat(5) + '（平台把后半段改了）',
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+    pos: { course: '军事理论', chapter: '7 中国古代国防工程建设', no: 3 },
+  };
+  const h = QB.lookup(bank, '', '单选', page);
+  assert.ok(h, '应命中');
+  assert.equal(h.viaPos, true, '要标明走的是位置键');
+  assert.equal(h.answer, 'A');
+});
+
+test('位置键：同位置撞多条 → 整组不收录、不命中', () => {
+  const a = 'f'.repeat(32), b = '0'.repeat(32);
+  const bank = bankFromEntries({
+    [a]: posEntry(a, '完全不同的第一道题' + 'Q'.repeat(20), 'A'),
+    [b]: posEntry(b, '完全不同的第二道题' + 'W'.repeat(20), 'B'),
+  });
+  const page = {
+    type: '单选', stem: '完全不同的第一道题' + 'Q'.repeat(20) + '（平台改写尾巴，主键/前缀键都 miss）',
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+    pos: { course: '军事理论', chapter: '7 中国古代国防工程建设', no: 3 },
+  };
+  assert.equal(QB.lookup(bank, '', '单选', page), null, '撞多条必须拒绝');
+});
+
+test('位置键：题干前 12 字不同 → 不命中（原来判定不受影响）', () => {
+  const k = '1'.repeat(32);
+  const bank = bankFromEntries({ [k]: posEntry(k, '甲甲甲甲甲甲甲甲甲甲甲甲' + 'X'.repeat(20), 'A') });
+  const page = {
+    type: '单选', stem: '乙乙乙乙乙乙乙乙乙乙乙乙' + 'X'.repeat(20),
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+    pos: { course: '军事理论', chapter: '7 中国古代国防工程建设', no: 3 },
+  };
+  assert.equal(QB.lookup(bank, '', '单选', page), null, '前 12 字不同必须拒绝');
+});
+

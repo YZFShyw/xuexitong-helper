@@ -2808,12 +2808,15 @@ function makeHelper(cfg, deps) {
          返回 { hit } / { miss: 原因 } / null（库里根本没有）。 */
       const bankHitOf = (q) => {
         if (!useBank) return null;              /* 题库模式关着 → 这道题就当库里没有 */
+        /* 【位置键上下文 · 2026-10-19】课程/章节/题号 —— 位置索引唯一命中时，
+           用"选项数相同 + 题干前 12 字相同"做降级校验（比其他键宽松，但撞多条/对不上就不用）。 */
+        q.pos = { course: courseNow || '', chapter: chapter || '', no: (Array.isArray(r.questions) ? r.questions.indexOf(q) + 1 : 0) };
         const fpKey = fp.fpOf(q);
         /* 页面这道题的图片指纹（算不出来就是空 —— 那时候按老办法用 URL 比） */
         const pageIds = (q.imgs || []).map((u) => imgIds.get(u)).filter(Boolean);
         const bk = bankGet(fpKey, q.type, q.imgs, altKeyOf(q), orderKeyOf(q), pageIds, q);
         if (!bk || !bk.hit) return bk;
-        if (!bk.hit.viaOrder && !bk.hit.viaLoose && !bk.hit.viaPrefix) return bk;
+        if (!bk.hit.viaOrder && !bk.hit.viaLoose && !bk.hit.viaPrefix && !bk.hit.viaPos) return bk;
         const rm = remapAnswerByText(bk.hit, q);
         if (!rm) return { miss: '选项顺序/字母对不上，按正文也没定位到（不填）' };
         return { hit: Object.assign({}, bk.hit, { answer: rm.answer, answerText: rm.answerText || bk.hit.answerText, byText: true }) };
@@ -3055,7 +3058,7 @@ function makeHelper(cfg, deps) {
             lines.push('      → 答案（题库' + (hit.lib ? '·' + hit.lib : '') + '·' + hit.trustLabel + '）：' + hit.answer +
               (hit.answerText ? '　【' + hit.answerText + '】' : '') +
               (hit.byText ? '（选项顺序/字母和库里不一样，已按**正文**重新对上）' : '') +
-              (hit.viaLoose ? '（宽松键命中：题面标点/题号写法与库里不同）' : ''));
+              (hit.viaLoose ? '（宽松键命中：题面标点/题号写法与库里不同）' : '') + (hit.viaPos ? '（位置键命中：课程/章节/题号一致）' : ''));
             if (hit.conflict) lines.push('        ⚠ ' + hit.conflictNote);
             if (cfg.autoFill && !r.graded) {
               const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt);
@@ -3120,7 +3123,7 @@ function makeHelper(cfg, deps) {
             lines.push('      → 答案（题库' + (hit.lib ? '·' + hit.lib : '') + '·' + hit.trustLabel + '）：' + hit.answer +
               (hit.answerText ? '　【' + hit.answerText + '】' : '') +
               (hit.byText ? '（选项顺序/字母和库里不一样，已按**正文**重新对上）' : '') +
-              (hit.viaLoose ? '（宽松键命中：题面标点/题号写法与库里不同）' : ''));
+              (hit.viaLoose ? '（宽松键命中：题面标点/题号写法与库里不同）' : '') + (hit.viaPos ? '（位置键命中：课程/章节/题号一致）' : ''));
             if (hit.conflict) lines.push('        ⚠ ' + hit.conflictNote);
             if (cfg.autoFill && !r.graded) {
               const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt);
