@@ -724,7 +724,11 @@ function lazyIndex(bankOut, name, build) {
 /* 【位置键 · 2026-10-19】课程 + 章节 + 题号 —— "同一门课同一章的第 N 题"就是同一道题。
    只在**三项齐全且索引唯一**时收录；撞多条整组不收录（宁漏不错）。
    注意：旧库没有 course/no 的条目不会被收录 —— 不满足的不影响原来的任何判定。 */
-const POS_NORM = (s) => String(s == null ? '' : s).replace(/[\s\u3000]+/g, '').replace(/^[0-9]+([.．、)）])?/, '');
+/* 【章节名归一化 · 2026-10-19】只去空白/全角空格，**不剥离编号**。
+   理由（法师定的）：记录和运行时读的是同一个目录标题，写法天然一致（"7 中国古代…"就是同一个字符串）；
+   去编号反而会制造坑（4.1 → 1信息化、3D → D打印）。编号写法真的变了 → 不对齐 → 不命中，
+   不影响任何原有判定。 */
+const POS_NORM = (s) => String(s == null ? '' : s).replace(/[\s\u3000]+/g, '');
 function posKeyOf(course, chapter, no) {
   const c = POS_NORM(course), ch = POS_NORM(chapter), n = String(Number(no) || 0);
   if (!c || !ch || n === '0') return '';

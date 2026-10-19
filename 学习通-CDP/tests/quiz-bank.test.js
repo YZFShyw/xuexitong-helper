@@ -1568,3 +1568,19 @@ test('位置键：题干前 12 字不同 → 不命中（原来判定不受影�
   assert.equal(QB.lookup(bank, '', '单选', page), null, '前 12 字不同必须拒绝');
 });
 
+
+test('位置键：章节名只归一空白，编号原样保留（两边的目录标题本来就一致）', () => {
+  assert.equal(
+    QB.posKeyOf('军事理论', '7 中国古代国防工程建设', 3),
+    QB.posKeyOf('军事理论', '7中国古代国防工程建设', 3),
+    '空格差异要能对齐'
+  );
+  assert.notEqual(
+    QB.posKeyOf('X', '7 中国古代国防工程建设', 3),
+    QB.posKeyOf('X', '中国古代国防工程建设', 3),
+    '编号不同就是不同键（不去编号，避免 4.1 被削坏）'
+  );
+  assert.equal(QB.posKeyOf('X', '4.1信息化战争', 2), QB.posKeyOf('X', '4.1 信息化战争', 2), '空白归一后 4.1 原样保留');
+  assert.equal(QB.posKeyOf('X', '3D打印技术', 1), 'X|3D打印技术|1', '不剥编号就不会误伤 3D');
+});
+
