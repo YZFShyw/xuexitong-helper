@@ -1190,6 +1190,15 @@ async function launchOwnedEdge(opts) {
   const profileDir = o.profileDir;
   const port = Number(o.port || 9222);
   if (!profileDir) return { ok: false, reason: '没有给 profileDir —— 不用独立 profile 就等于会跟用户自己的 Edge 抢，拒绝启动' };
+  /* 【拒绝 Edge 默认用户目录】2026-10-20 实报：开始.cmd 把 SANDBOX 设成
+     `%LOCALAPPDATA%\Microsoft\Edge\User` —— 那正是用户日常 Edge 的 profile 目录。
+     带 --remote-debugging-port 的新实例被已有实例接管，9222 永远起不来，表现就是"浏览器拉不起来"。
+     这里在代码层兜住：指向默认目录就拒绝，不让配置错误静默地退化成"没调试端口的浏览器"。 */
+  const profBase = String(path.basename(profileDir) || '').toLowerCase();
+  const profParent = String(path.basename(path.dirname(profileDir)) || '').toLowerCase();
+  if (profBase === 'user' || profBase === 'default' || profParent === 'microsoft') {
+    return { ok: false, reason: 'profileDir 指向 Edge 的默认用户目录（' + profileDir + '）—— 会跟用户日常 Edge 共用同一实例，调试端口起不来；请换成独立目录（例：…\\Edge\\User-学习通）' };
+  }
   const found = findEdgeExe(o.edgeExe);
   if (!found.ok) return { ok: false, reason: found.reason };
   try { fs.mkdirSync(profileDir, { recursive: true }); } catch (e) {}
