@@ -25,7 +25,7 @@ if errorlevel 1 (
 )
 set "RTP=%~dp0..\runtime-processes.js"
 set "CDPPORT=9222"
-set "SANDBOX=%LOCALAPPDATA%\Microsoft\Edge\User-学习通"
+set "SANDBOX=%LOCALAPPDATA%\Microsoft\Edge\User"
 
 rem ============================================================
 rem  本轮批次标识：由"新启动"生成，外套（驱动器循环.cmd）内部重启会沿用它。
@@ -63,6 +63,14 @@ rem  现在：只启动"自己的那一个"，并把它的所有权记下来（PID + 创建时间 + 独立 pro
 rem  以后「关浏览器」只关凭证里那一个，用户自己开的 Edge 一律不碰。
 rem ==========================================================
 echo [1/3] 调试端口不在，启动一个**专供助手**的浏览器实例（独立 profile）。
+
+rem ==========================================================
+rem  【2026-10-20 重拉前先清残留】关窗口只关窗口，后台 gpu/utility 进程可能还赖在这个
+rem  profile 上；不清掉的话新实例会被转交 ? 9222 起不来（实报：关掉再重拉就失败）。
+rem  只按 profile+port 精确清我们自己的实例，不碰用户日常 Edge。
+rem ==========================================================
+"%NODEEXE%" "%RTP%" --stop-edge --base "%BATCHDIR%" --profile "%SANDBOX%" --port %CDPPORT% >nul 2>&1
+
 echo.
 echo       不会关闭你现在开着的任何 Edge 窗口 —— 它用的是独立的用户数据目录，
 echo       跟你平时那个 Edge 互不影响（登录状态也是分开的，需要在这个窗口里登录一次）。
