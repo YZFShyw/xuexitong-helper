@@ -25,7 +25,7 @@ if errorlevel 1 (
 )
 set "RTP=%~dp0..\runtime-processes.js"
 set "CDPPORT=9222"
-set "SANDBOX=%LOCALAPPDATA%\Microsoft\Edge\User"
+set "SANDBOX=%LOCALAPPDATA%\Microsoft\Edge\User-学习通"
 
 rem ============================================================
 rem  本轮批次标识：由"新启动"生成，外套（驱动器循环.cmd）内部重启会沿用它。
