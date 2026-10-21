@@ -1938,7 +1938,7 @@ async function clickPicksByCdp(ev, clickAt, hint, spec, rr) {
 }
 
 /* 返回一句可以直接打进日志的结论。绝不假装成功。 */
-async function tryFill(ev, rawStem, answer, type, clickAt) {
+async function tryFill(ev, rawStem, answer, type, clickAt, opts) {
   const hint = String(rawStem || '').replace(/\s+/g, '');
   if (!hint) return '（题干是空的，定位不了，没填）';
 
@@ -1966,7 +1966,27 @@ async function tryFill(ev, rawStem, answer, type, clickAt) {
     spec = { by: 'input', v: [txt] };
   }
 
-  const r = await clickPicksByCdp(ev, clickAt, hint, spec, await ev(fillAct(hint, spec)));
+  let r = await clickPicksByCdp(ev, clickAt, hint, spec, await ev(fillAct(hint, spec)));
+  /* 【题干定位不到 ⇒ 按题号顺序再试一次】（2026-10-21 法师要求"一次填完"）
+     实测（18:54 那一章 10 道公式题）：答案已经拿到、页面却「定位不到这道题（题干在页面上找不到）」——
+     多为问完 AI 之后页面重绘/滚动，题干文本对不上了。题号（页面顺序）是稳的，所以失败时
+     用 fillAct(number) 再试一次。**必须先核对页面题数**：只有当"现在页面上的题数"跟读题时
+     一致，按题号定位才不会填错题；数量对不上就老实报没填上。 */
+  if ((!r || !r.ok) && opts && typeof opts.idx === 'number') {
+    try {
+      const peek2 = await ev(fillAct(0, { by: 'probe', v: [] }));
+      const nNow = peek2 && typeof peek2.n === 'number' ? peek2.n : -1;
+      const nWant = typeof opts.total === 'number' ? opts.total : -1;
+      if (nNow > 0 && (nWant < 0 || nNow === nWant)) {
+        const r2 = await clickPicksByCdp(ev, clickAt, opts.idx, spec, await ev(fillAct(opts.idx, spec)));
+        if (r2 && r2.ok) { r = r2; r.byIndex = true; }
+      } else {
+        r = Object.assign({}, r || {}, {
+          why: ((r && r.why) || '页面没响应') + '；按题号重试也放弃（页面题数 ' + nNow + ' ≠ 读题时 ' + nWant + '）',
+        });
+      }
+    } catch (e) { /* 重试失败就保留第一次的结论 */ }
+  }
   if (r && r.ok && r.typed && r.picks && r.picks.length) {
     const wrote = r.picks.filter((x) => x.selected).length;
     return '（填空）已写进 ' + wrote + ' 个空：' + r.picks.map((x) => String(x.wrote || '').slice(0, 20)).join(' | ');
@@ -3190,7 +3210,7 @@ function makeHelper(cfg, deps) {
               (hit.viaLoose ? '（宽松键命中：题面标点/题号写法与库里不同）' : '') + (hit.viaPos ? '（位置键命中：课程/章节/题号一致）' : ''));
             if (hit.conflict) lines.push('        ⚠ ' + hit.conflictNote);
             if (cfg.autoFill && !r.graded) {
-              const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt);
+              const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt, { idx: r.questions.indexOf(q), total: r.questions.length });
               lines.push('      → ' + st);
               if (st.indexOf('没填上') >= 0 || st.indexOf('没填') >= 0) {
                 noteMiss(q, '题库答案「' + hit.answer + '」填不进页面：' + st);
@@ -3255,7 +3275,7 @@ function makeHelper(cfg, deps) {
               (hit.viaLoose ? '（宽松键命中：题面标点/题号写法与库里不同）' : '') + (hit.viaPos ? '（位置键命中：课程/章节/题号一致）' : ''));
             if (hit.conflict) lines.push('        ⚠ ' + hit.conflictNote);
             if (cfg.autoFill && !r.graded) {
-              const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt);
+              const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt, { idx: r.questions.indexOf(q), total: r.questions.length });
               lines.push('      → ' + st);
               if (st.indexOf('没填上') >= 0 || st.indexOf('没填') >= 0) {
                 noteMiss(q, '题库答案「' + hit.answer + '」填不进页面：' + st);
@@ -3860,7 +3880,7 @@ function makeHelper(cfg, deps) {
                 lines.push('      → 这一页已经在显示答案了（说明交过了），不填');
                 noteMiss(q, '页面已在显示答案（已交过），没填');
               } else {
-                const st = await tryFill(evFn, q.stem, p.answer, q.type, clickAt);
+                const st = await tryFill(evFn, q.stem, p.answer, q.type, clickAt, { idx: r.questions.indexOf(q), total: r.questions.length });
                 lines.push('      → ' + st);
                 if (st.indexOf('没填上') >= 0 || st.indexOf('没填') >= 0) {
                   noteMiss(q, '答案「' + p.answer + '」填不进页面：' + st);
