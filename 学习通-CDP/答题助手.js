@@ -4054,6 +4054,49 @@ function makeHelper(cfg, deps) {
           const mn = piece.match(/第(\d+)题/);
           if (mn) vDone.add(Number(mn[1]));
         }
+        /* 【整页截屏兜底 · 2026-10-21 法师要求】逐题截图补不上的，用**整页**再试一次。
+           为什么需要：有些题的图不在题块范围内（图挂在题块外面、或被平台定位到别处），
+           只拍题块就永远看不到它。这里把整章所有题块都拍一遍（grabShots 不传 only），
+           再只问"还没补上的那几道"。每章最多一次，拿不到就照旧记欠账。 */
+        const vMissedIdx = visionMissed.filter((x) => !vDone.has(x.qi + 1)).map((x) => x.qi);
+        if (vMissedIdx.length) {
+          lines.push('     ↳ 还有 ' + vMissedIdx.length + ' 道没补上 ⇒ 整页截屏兜底（图可能不在题块内）：');
+          const fDiag = { note: [], captureErrors: [] };
+          let fShots = [];
+          try { fShots = await grabShots(evFn, shot, Math.max(cfg.maxShots || 3, 20), fDiag, null); }
+          catch (e) { fShots = []; fDiag.captureErrors.push('整页截图抛错：' + ((e && e.message) || e)); }
+          for (const nl of (fDiag.note || [])) lines.push('       ' + nl);
+          if (!fShots.length) {
+            lines.push('       → 整页截图也没拿到（' + ((fDiag.captureErrors || [])[0] || '未知原因') + '）');
+          } else {
+            lines.push('       → 整页截了 ' + fShots.length + ' 张，只问第 ' + vMissedIdx.map((i) => i + 1).join('、') + ' 题：');
+            try {
+              const askOnly = '这次只需要回答第 ' + vMissedIdx.map((i) => i + 1).join('、') +
+                ' 题（按题号给答案，其余题不要输出）。';
+              let va2 = await askWithShots(cfg, fShots, askOnly);
+              QS.addUsage(usage, va2 && va2.usage);
+              if (va2 && va2.empty) {
+                await new Promise((r2) => setTimeout(r2, 1200));
+                va2 = await askWithShots(cfg, fShots, askOnly);
+                QS.addUsage(usage, va2 && va2.usage);
+              }
+              lines.push('       ──── 整页兜底答案（模型生成，没有验证过）────');
+              for (const L of String((va2 && va2.text) || '').split(/\r?\n/)) lines.push('       ' + L);
+              lines.push('       ──────────────────────────────────');
+              const vMsg2 = await fillFromText(evFn, renumberAnswers((va2 && va2.text) || ''), vMissedIdx.length, {
+                indexMap: vMissedIdx, reopenQuiz: reopenQuiz, clickAt: clickAt
+              });
+              lines.push('       → ' + vMsg2);
+              const m2 = String(vMsg2).match(/已按顺序填进页面：([\s\S]*)$/);
+              if (m2) for (const piece of m2[1].split('；')[0].split('，')) {
+                const mn = piece.match(/第(\d+)题/);
+                if (mn) vDone.add(Number(mn[1]));
+              }
+            } catch (e) {
+              lines.push('       → 整页兜底失败：' + ((e && e.message) || e));
+            }
+          }
+        }
         let vBack = 0;
         for (const x of visionMissed) {
           if (vDone.has(x.qi + 1)) { noteFilled(); vBack++; }
