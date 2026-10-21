@@ -934,12 +934,17 @@ function scrollToQuestion(idx) {
   return '(function () {\n' +
     '  var SELS = [".TiMu", ".questionLi", ".question-item", ".test-item", ".queBox", ".exam-question"];\n' +
     '  function rootsIn(doc) {\n' +
+    '    /* 【选元素最多的那个选择器 · 2026-10-21】作业页上 `.TiMu` 只有 1 个（整个卷子一个容器），\n' +
+    '       而 `.questionLi` 有 14 个（每题一个）。原来"第一个有命中的选择器就返回"，于是只拿到 1 个\n' +
+    '       整卷 → 看图补漏的 only=[2,9,10] 全部越界 → 带图题"一张都没截到"。现在按数量取最多的那组。 */\n' +
+    '    var best = null;\n' +
     '    for (var s = 0; s < SELS.length; s++) {\n' +
     '      var g = null;\n' +
     '      try { g = doc.querySelectorAll(SELS[s]); } catch (e) { continue; }\n' +
-    '      if (g && g.length) { var a = []; for (var k = 0; k < g.length; k++) a.push(g[k]); return a; }\n' +
+    '      if (g && g.length && (!best || g.length > best.length)) best = g;\n' +
     '    }\n' +
-    '    return [];\n' +
+    '    if (!best) return [];\n' +
+    '    var a = []; for (var k = 0; k < best.length; k++) a.push(best[k]); return a;\n' +
     '  }\n' +
     '  var flat = [], seen = [document];\n' +
     '  function walk(doc, depth) {\n' +
@@ -998,12 +1003,17 @@ function questionShotPlan() {
     '  var SELS = [".TiMu", ".questionLi", ".question-item", ".test-item", ".queBox", ".exam-question"];\n' +
     '  var out = [], docsSeen = 0;\n' +
     '  function rootsIn(doc) {\n' +
+    '    /* 【选元素最多的那个选择器 · 2026-10-21】作业页上 `.TiMu` 只有 1 个（整个卷子一个容器），\n' +
+    '       而 `.questionLi` 有 14 个（每题一个）。原来"第一个有命中的选择器就返回"，于是只拿到 1 个\n' +
+    '       整卷 → 看图补漏的 only=[2,9,10] 全部越界 → 带图题"一张都没截到"。现在按数量取最多的那组。 */\n' +
+    '    var best = null;\n' +
     '    for (var s = 0; s < SELS.length; s++) {\n' +
     '      var g = null;\n' +
     '      try { g = doc.querySelectorAll(SELS[s]); } catch (e) { continue; }\n' +
-    '      if (g && g.length) { var a = []; for (var k = 0; k < g.length; k++) a.push(g[k]); return a; }\n' +
+    '      if (g && g.length && (!best || g.length > best.length)) best = g;\n' +
     '    }\n' +
-    '    return [];\n' +
+    '    if (!best) return [];\n' +
+    '    var a = []; for (var k = 0; k < best.length; k++) a.push(best[k]); return a;\n' +
     '  }\n' +
     '  function walk(doc, ox, oy, depth) {\n' +
     '    if (depth > 4) return;\n' +
@@ -1071,12 +1081,17 @@ function titleShotPlan() {
     '  var SELS = [".TiMu", ".questionLi", ".question-item", ".test-item", ".queBox", ".exam-question"];\n' +
     '  var out = [], docsSeen = 0;\n' +
     '  function rootsIn(doc) {\n' +
+    '    /* 【选元素最多的那个选择器 · 2026-10-21】作业页上 `.TiMu` 只有 1 个（整个卷子一个容器），\n' +
+    '       而 `.questionLi` 有 14 个（每题一个）。原来"第一个有命中的选择器就返回"，于是只拿到 1 个\n' +
+    '       整卷 → 看图补漏的 only=[2,9,10] 全部越界 → 带图题"一张都没截到"。现在按数量取最多的那组。 */\n' +
+    '    var best = null;\n' +
     '    for (var s = 0; s < SELS.length; s++) {\n' +
     '      var g = null;\n' +
     '      try { g = doc.querySelectorAll(SELS[s]); } catch (e) { continue; }\n' +
-    '      if (g && g.length) { var a = []; for (var k = 0; k < g.length; k++) a.push(g[k]); return a; }\n' +
+    '      if (g && g.length && (!best || g.length > best.length)) best = g;\n' +
     '    }\n' +
-    '    return [];\n' +
+    '    if (!best) return [];\n' +
+    '    var a = []; for (var k = 0; k < best.length; k++) a.push(best[k]); return a;\n' +
     '  }\n' +
     '  function walk(doc, ox, oy, depth) {\n' +
     '    if (depth > 4) return;\n' +
@@ -1537,10 +1552,13 @@ function fillAct(hint, spec) {
     '  var NUM = "span.num_option, span.num_option_dx, span.check_answer, span.check_answer_dx";',
     '  var roots = [], docs = allDocs();',
     '  for (var d2 = 0; d2 < docs.length; d2++) {',
+    '    /* 【同样按"元素最多"取，别被唯一的整卷容器骗到】见 rootsIn 那条注释 */',
+    '    var bestG = null;',
     '    for (var s = 0; s < SELS.length; s++) {',
-    '      var g = docs[d2].querySelectorAll(SELS[s]);',
-    '      if (g.length) { for (var k = 0; k < g.length; k++) if (roots.indexOf(g[k]) < 0) roots.push(g[k]); break; }',
+    '      var g = null; try { g = docs[d2].querySelectorAll(SELS[s]); } catch (e) { g = null; }',
+    '      if (g && g.length && (!bestG || g.length > bestG.length)) bestG = g;',
     '    }',
+    '    if (bestG) for (var k0 = 0; k0 < bestG.length; k0++) if (roots.indexOf(bestG[k0]) < 0) roots.push(bestG[k0]);',
     '  }',
     '  var el = null, how = "";',
     /* 【只读预检】只数"页面上现在有几道题"，绝不点任何东西。
