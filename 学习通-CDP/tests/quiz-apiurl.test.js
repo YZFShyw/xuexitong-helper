@@ -39,10 +39,12 @@ test('显示时要打码：URL 里带 token 的网关不许把查询串打进日
   assert.ok(Q.maskApiUrl('https://gw.example/v1/chat?token=SECRET').indexOf('SECRET') < 0, 'token 不许露出来');
 });
 
-test('源码契约：三处 API 调用都必须走 apiUrlOf(cfg)，不许再写死', () => {
+test('源码契约：所有 API 调用都必须走 apiUrlOf(cfg)，不许再写死', () => {
   const src = fs.readFileSync(path.join(ROOT, '答题助手.js'), 'utf8');
   const n = (src.match(/fetchWithTimeout\(apiUrlOf\(cfg\),/g) || []).length;
-  assert.equal(n, 3, '问答/直接问/看图 三处都要用配置里的地址，现在是 ' + n + ' 处');
+  /* 2026-10-21：新增 askWithShots（带图作答），从三处变四处 —— 断言改成"至少三处"，
+     既钉住"新加的也得走配置地址"，又不会因为多一条合法调用就红。 */
+  assert.ok(n >= 3, '问答/直接问/看图/带图作答 都要用配置里的地址，现在只有 ' + n + ' 处');
   assert.equal((src.match(/fetchWithTimeout\(API_URL,/g) || []).length, 0, '不许再有写死的 fetch(API_URL)');
   assert.match(src, /function apiUrlOf\(cfg\)/, '规则集中在 apiUrlOf 里，别处别自己拼');
 });

@@ -1029,8 +1029,11 @@ function questionShotPlan() {
     '         模型回的就是"图片内容为空白"，整章白丢。\n' +
     '         光加顶层的 pageYOffset 不够（试过，仍然 -451），因为滚动发生在**里面那层**。\n' +
     '         所以每往下一层就把那一层文档自己的滚动量加进累计偏移。 */\n' +
+    '      /* 【只有 iframe 层才加它自己的滚动量】主文档的滚动量由调用方统一加一次（grabShots 加 sj）。\n' +
+    '         2026-10-21 修：作业页 scrollY=4564 时，这里再加一次 + 调用方再加一次 = 加成两遍，\n' +
+    '         截图偏了整整一屏（题 3 截到第 5、6 题，题 10/11 截成空白）。 */\n' +
     '      var sx = 0, sy = 0;\n' +
-    '      try { sx = doc.defaultView.pageXOffset || 0; sy = doc.defaultView.pageYOffset || 0; } catch (e) {}\n' +
+    '      if (depth > 0) { try { sx = doc.defaultView.pageXOffset || 0; sy = doc.defaultView.pageYOffset || 0; } catch (e) {} }\n' +
     /* 【这里原来 push 两条矩形，是错的】
        一条含本层文档的滚动量、一条不含；只有当页面 scrollY>0 时两条才不同，
        而下面 ±12px 的"几乎重叠"去重又会把第二条当成第一条的副本丢掉。
@@ -1102,8 +1105,11 @@ function titleShotPlan() {
     '      var tt = null; try { tt = el.querySelector(".Zy_TItle") || el; } catch (e) { tt = el; }\n' +
     '      var r; try { r = tt.getBoundingClientRect(); } catch (e) { continue; }\n' +
     '      if (!r || r.width < 200 || r.height < 20) continue;\n' +
+    '      /* 【只有 iframe 层才加它自己的滚动量】主文档的滚动量由调用方统一加一次（grabShots 加 sj）。\n' +
+    '         2026-10-21 修：作业页 scrollY=4564 时，这里再加一次 + 调用方再加一次 = 加成两遍，\n' +
+    '         截图偏了整整一屏（题 3 截到第 5、6 题，题 10/11 截成空白）。 */\n' +
     '      var sx = 0, sy = 0;\n' +
-    '      try { sx = doc.defaultView.pageXOffset || 0; sy = doc.defaultView.pageYOffset || 0; } catch (e) {}\n' +
+    '      if (depth > 0) { try { sx = doc.defaultView.pageXOffset || 0; sy = doc.defaultView.pageYOffset || 0; } catch (e) {} }\n' +
     '      /* 坐标语义：**视口坐标**（每层 iframe 的滚动已含在 getBoundingClientRect 里，不再重复加）；\n' +
     '         调用方只再加主文档 scroll —— 与验证脚本完全一致。原来多加了每层 pageOffset，\n' +
     '         调用方又加一次主文档 scroll，滚动量算两遍 → 运行时只命中视口附近那一题（1/10）。 */\n' +
@@ -1423,6 +1429,41 @@ const ANSWER_FROM_TEXT = [
   '拿不准就写「不确定」并说明卡在哪，不要硬猜。'
 ].join('\n');
 
+/* 【带图作答 · 2026-10-21】把题目截图和抄录文字一起交给模型，让它**看着图**作答。
+   为什么需要：抄录（transcribeShots）只抄"文字"，图里的电路/几何/表格它抄不出来 ——
+   实测作业第 11 题（三道题共用同一张电路图）：「已知电路如图，问该电路可以实现的功能」，
+   抄录文本里只有"如图"两个字，纯文字作答的模型直接回"题干未提供电路图，无法判断"。
+   同一个模型看着图就能算（第 3、10 题就是靠它补上的）。所以看图补漏这一步改成
+   "截图 + 抄录文字一起发过去"，不再"先抄成文字、再拿文字去问"。
+   返回结构与 askRaw 同构：{ text, usage, empty, note, attempts }。 */
+async function askWithShots(cfg, shots, text) {
+  const content = [{ type: 'text', text: ANSWER_FROM_TEXT + '\n\n' + String(text || '') }];
+  for (const b of (shots || [])) {
+    if (!b) continue;
+    content.push({ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + b } });
+  }
+  const r = await fetchWithTimeout(apiUrlOf(cfg), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.apiKey },
+    body: JSON.stringify({
+      model: cfg.visionModel || 'deepseek-flash',
+      max_tokens: MAX_TOKENS,
+      thinking: { type: 'enabled' },
+      reasoning_effort: 'max',        /* 这一步是**解题**（答案决定对错），跟 askRaw 一样给 max */
+      messages: [{ role: 'user', content }]
+    })
+  }, { timeoutMs: VISION_TIMEOUT_MS });
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error('看图作答 API ' + r.status + ' ' + t.slice(0, 200));
+  }
+  const j = await r.json();
+  const pt3 = pickText(j);
+  pt3.usage = j && j.usage;
+  pt3.attempts = r.__apiAttempts || 1;
+  return pt3;
+}
+
 /* ==================================================================
  * 把 AI 给的答案填进页面 —— 【只填，不交】
  *
@@ -1730,6 +1771,20 @@ function fillAct(hint, spec) {
    所以只能按顺序对位（抄录顺序就是页面顺序）。
 
    每条仍会检查"点完页面变了没有"，没变就如实报失败。 */
+
+/* 【题号重编 · 2026-10-21】AI 是按"原题号"回答的（作业里是 10. / 11.），而 fillFromText 的
+   indexMap 是按"第 1..vN 条"对位的 —— 不重编就会被当成"越界"全部跳过（实测第 10、11 两道都丢）。
+   抄录顺序 = 截图顺序 = onlyIdx 顺序，所以按出现顺序重编成 1..N 就是正确的对应关系。 */
+function renumberAnswers(txt) {
+  let k = 0;
+  return String(txt == null ? '' : txt).split(/\r?\n/).map((line) => {
+    const m = line.match(/^(\s*)(\d{1,2})(\s*[.、)）])/);
+    if (!m) return line;
+    k++;
+    return m[1] + k + m[3] + line.slice(m[0].length);
+  }).join('\n');
+}
+
 async function fillFromText(ev, text, domCount, deps) {
   const picks = [];
   const skipped = [];          /* 认出来了但填不了的，一条都不许悄悄丢 */
@@ -3967,19 +4022,20 @@ function makeHelper(cfg, deps) {
               lines.push('     ──── 看图抄录（原样，未经加工）────');
               for (const L of String(vt.text).split(/\r?\n/)) lines.push('     ' + L);
               lines.push('     ──────────────────────────────────');
-              let va = await askRaw(ANSWER_FROM_TEXT + '\n\n' + vt.text, cfg);
+              /* 【带图作答】把截图和抄录文字一起发过去 —— 抄录里"如图"两个字，模型看图才推得出 */
+              let va = await askWithShots(cfg, vShots, vt.text);
               QS.addUsage(usage, va && va.usage);
               if (va && va.empty) {
                 lines.push('     → 第一次问没拿到正文（思考把额度吃光了），原样重问一次…');
                 await new Promise((r2) => setTimeout(r2, 1200));
-                va = await askRaw(ANSWER_FROM_TEXT + '\n\n' + vt.text, cfg);
+                va = await askWithShots(cfg, vShots, vt.text);
                 QS.addUsage(usage, va && va.usage);
               }
               lines.push('     ──── 看图答案（模型生成，没有验证过）────');
               for (const L of String(va.text).split(/\r?\n/)) lines.push('     ' + L);
               lines.push('     ──────────────────────────────────');
               try {
-                vMsg = await fillFromText(evFn, va.text, vN, {
+                vMsg = await fillFromText(evFn, renumberAnswers(va.text), vN, {
                   indexMap: onlyIdx, reopenQuiz: reopenQuiz, clickAt: clickAt
                 });
               } catch (e) { vMsg = '填充出错：' + ((e && e.message) || e); }
@@ -4038,7 +4094,7 @@ module.exports = {
   loadConfig, saveConfig, makeHelper, parseAnswer,
   decodeObf, hasFontTable, loadFontTable, fontTableMatches,
   /* 下面几个是为了能单独测"截图读题"和"填进页面"这两条路而导出的 */
-  grabShots, transcribeShots, scrollToQuestion, countQuestions, askRaw, titleShotPlan,
+  grabShots, transcribeShots, scrollToQuestion, countQuestions, askRaw, askWithShots, titleShotPlan,
   fillAct, tryFill, fillFromText, JUDGE_SYN, saveDraft, saveProbe, questionShotPlan,
   modelMigrationNote, DEAD_MODELS,
   DEFAULT_CFG, FONT_TABLE,
