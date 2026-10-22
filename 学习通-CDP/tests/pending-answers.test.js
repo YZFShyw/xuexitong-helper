@@ -55,3 +55,19 @@ test('applyAnswer：把人工答案补进题库条目，清单标 filled（不�
   assert.equal(after.status, 'filled', '清单要标已完成');
   assert.equal(after.filledAnswer, 'C');
 });
+
+/* 【codex 2026-10-22 报告 + 复现】不同选项的两道题，指纹必须不同 ——
+   否则 addMiss 会把它们当成同一道题合并，补答案时可能填错题。
+   根因：noteMiss 传的是字符串数组（'A. 甲'），fpOf 读 op.letter/op.text 全是 undefined，
+   选项段一律变成 ':'，于是同题干不同选项的题算出同一个指纹。 */
+test('不同选项的两道题不能合并（指纹必须可区分）', () => {
+  const a = { type: '单选', stem: '下列说法正确的是', options: ['A. 甲', 'B. 乙'] };
+  const b = { type: '单选', stem: '下列说法正确的是', options: ['A. 丙', 'D. 丁'] };
+  assert.notEqual(pending.fpOf(a), pending.fpOf(b), '选项不同，指纹必须不同');
+  /* 对象形态（新 noteMiss 传的就是这个）也要能区分 */
+  const c = { type: '单选', stem: '下列说法正确的是', options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }] };
+  const d = { type: '单选', stem: '下列说法正确的是', options: [{ letter: 'A', text: '丙' }, { letter: 'D', text: '丁' }] };
+  assert.notEqual(pending.fpOf(c), pending.fpOf(d), '对象形态同样要能区分');
+  /* 同题同选项 → 指纹必须一致（去重要照旧生效） */
+  assert.equal(pending.fpOf(a), pending.fpOf({ type: '单选', stem: '下列说法正确的是', options: ['A. 甲', 'B. 乙'] }));
+});

@@ -3061,7 +3061,8 @@ function makeHelper(cfg, deps) {
               chapter: chapter || '',
               type: q ? q.type : '',
               stem: q ? String(q.stem || '').slice(0, 200) : '',
-              options: q && q.options ? q.options.map((o) => (o.letter || '?') + '. ' + String(o.text || '').slice(0, 80)) : [],
+              /* 【必须传 {letter,text} 对象】2026-10-22 codex 报告 + 复现：这里原来传的是字符串数组\n                 （'A. 甲'），而 fpOf 读的是 o.letter/o.text → 全成 undefined → 每道题的选项部分都变成 ':'\n                 → 同题干、不同选项的两道题算出同一个指纹 → 被合并成同一条待补记录。 */
+              options: q && q.options ? q.options.map((o) => ({ letter: String(o.letter || ''), text: String(o.text || '').slice(0, 80) })) : [],
               why: whyMiss || '未知',
             });
           }
@@ -3501,7 +3502,7 @@ function makeHelper(cfg, deps) {
               }
             }
             const bk0 = bankLoad();
-            if (bk0 && shots.length && tfp.every((f) => f)) {
+            if (bk0 && shots.length && tfp.length > 0 && tfp.every((f) => f)) {
               const hits0 = tfp.map((f, i) => {
                 const h = TFA.match(bk0, f, { minScore: 0.90, minGap: 0.02, minRow: 0.85 });
                 if (!h) return null;
@@ -3509,7 +3510,7 @@ function makeHelper(cfg, deps) {
                 if (q0 && (h.entry.options || []).length !== (q0.options || []).length) return null;
                 return (h.entry && h.entry.answer) ? h.entry : null;
               });
-              if (hits0.every(Boolean)) {
+              if (hits0.length > 0 && hits0.every(Boolean)) {
                 const txt0 = hits0.map((e, i) => (i + 1) + '. ' + e.answer + (e.answerText ? (' ' + e.answerText) : '')).join('\n');
                 presetA = { text: txt0, empty: false, note: '题图指纹命中题库（未调 AI）', usage: null, attempts: 0 };
                 lines.push('  → 题图指纹：' + shots.length + ' 题全部命中题库（NCC ≥0.90 + 行投影 ≥0.85），不抄录、不问 AI。');

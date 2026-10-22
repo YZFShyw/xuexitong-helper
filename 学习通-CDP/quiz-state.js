@@ -323,6 +323,11 @@ function makeFingerprinter(opts) {
     const stem = normalizeForFp(decode(String(qq.stem == null ? '' : qq.stem)));
     const opts2 = Array.isArray(qq.options) ? qq.options : [];
     const optText = opts2.map((op) => {
+      /* 【兼容"选项是字符串"的旧数据】2026-10-22：待补答案历史记录里 options 存的是
+         'A. 甲' 这种字符串。原来直接读 op.letter/op.text → 全是 undefined →
+         每道题的选项段都变成 ':' → 同题干不同选项的题算出同一个指纹、被合并。
+         字符串就整串当文本（s: 前缀，跟对象形态区分开），对象数组的行为一个字没变。 */
+      if (typeof op === 'string') return 's:' + normalizeForFp(decode(op));
       const letter = String((op && op.letter) || '').toUpperCase();
       return letter + ':' + normalizeForFp(decode(String((op && op.text) == null ? '' : op.text)));
     });
