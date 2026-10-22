@@ -123,7 +123,11 @@ async function askModel(item) {
   let cfg = {};
   try { cfg = JSON.parse(fs.readFileSync(CFG_FILE, 'utf8').replace(/^\uFEFF/, '')); } catch (e) { cfg = {}; }
   if (!cfg.apiKey) throw new Error('答题设置.json 里没有 apiKey');
-  const opts = (item.options || []).map((t, i) => String.fromCharCode(65 + i) + '. ' + String(t)).join('\n');
+  const opts = (item.options || []).map((op, i) => {
+    /* 兼容两种形态：新记录是 {letter,text}，历史记录是 'A. 甲' 这种字符串 */
+    if (op && typeof op === 'object') return (op.letter || String.fromCharCode(65 + i)) + '. ' + (op.text == null ? '' : String(op.text));
+    return String.fromCharCode(65 + i) + '. ' + String(op);
+  }).join('\n');
   const prompt = [
     '你在给一道' + String(item.type || '') + '题作答，题干里可能有摘录缺失。',
     '题干：' + String(item.stem || ''),

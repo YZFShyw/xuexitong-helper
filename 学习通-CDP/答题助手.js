@@ -3502,7 +3502,9 @@ function makeHelper(cfg, deps) {
               }
             }
             const bk0 = bankLoad();
-            if (bk0 && shots.length && tfp.length > 0 && tfp.every((f) => f)) {
+            /* 【必须尊重「关闭题库/只记录」设置】2026-10-22 codex 复核：这条分支原来只判 bk0，
+               于是 useBank=false 或 mode<2 时仍会拿题库答案直接填 —— 绕过了用户的设置。 */
+            if (useBank && cfg.mode >= 2 && bk0 && shots.length && tfp.length > 0 && tfp.every((f) => f)) {
               const hits0 = tfp.map((f, i) => {
                 const h = TFA.match(bk0, f, { minScore: 0.90, minGap: 0.02, minRow: 0.85 });
                 if (!h) return null;

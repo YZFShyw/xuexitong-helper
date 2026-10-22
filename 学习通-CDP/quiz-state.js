@@ -350,8 +350,15 @@ function makeFingerprinter(opts) {
      数学式子的结构不能被洗掉。键 = sha256("loose1\n"+题型+"\n"+去分隔标点题干+"\n"+
      去分隔标点选项排序) 的前 hexLen 位。
      用法：主键/别名/顺序键都 miss 时**兜底**；撞多条一律不用（宁可漏，不填错）。 */
+  /* 【小数点必须保住 · 2026-10-22 codex 复核 + 复现】SEP_LOOSE 里原来含 `.` 和 `．`，
+     于是 `x=1.5` 和 `x=15` 归一成同一个串 —— 两道不同的题共用宽松键，可能拿到错答案。
+     现在：先把"数字.数字"保护成占位符，剔完标点再还原；题号点（`1. 题干`，点后不是数字）
+     照旧被剔掉，宽松键的原有用途不变。 */
   const SEP_LOOSE = /[,，、;；。.．:：·・\s\u3000]+/g;
-  const looseText = (x) => String(x == null ? '' : x).replace(SEP_LOOSE, '');
+  const looseText = (x) => String(x == null ? '' : x)
+    .replace(/(\d)[.．](\d)/g, '$1\u0001$2')
+    .replace(SEP_LOOSE, '')
+    .replace(/\u0001/g, '.');
   const looseOf = (q) => {
     const qq = q || {};
     const stem = looseText(decode(String(qq.stem == null ? '' : qq.stem))).toLowerCase();
@@ -367,12 +374,18 @@ function makeFingerprinter(opts) {
      用法：主键/别名/顺序键都 miss 时再试；命中后字母仍要按正文重定位。 */
   const prefixOf = (q) => {
     const qq = q || {};
-    const stem = normalizeForFp(decode(String(qq.stem == null ? '' : qq.stem))).slice(0, 40);
+    const full = normalizeForFp(decode(String(qq.stem == null ? '' : qq.stem)));
+    const stem = full.slice(0, 40);
+    /* 【尾部也要进键 · 2026-10-22 codex 复核】原来只取前 40 字，于是"共同题干很长、
+       只有末尾「正确/错误」不同"的两道判断题 → 前 40 字相同 + 选项集合相同（都是对/错）
+       → 算出同一个前缀键 → 可能拿到另一道题的答案。现在把末尾 12 字也纳入键
+       （题干短到已全含在前 40 字里时不再重复加）。版本号 prefix1 → prefix2，旧索引自然作废。 */
+    const tail = full.length > 40 ? full.slice(-12) : '';
     const opts2 = Array.isArray(qq.options) ? qq.options : [];
     const opts = opts2.map((op) => normalizeForFp(decode(String((op && op.text) == null ? '' : op.text)))).sort();
     const type = normalizeForFp(String(qq.type == null ? '' : qq.type));
     if (!stem) return '';
-    return hash('prefix1\n' + type + '\n' + stem + '\n' + opts.join('\n')).slice(0, hexLen);
+    return hash('prefix2\n' + type + '\n' + stem + '\n' + tail + '\n' + opts.join('\n')).slice(0, hexLen);
   };
 
   return { fpOf, digestOf, normalizeForFp, looseOf, looseText, prefixOf };

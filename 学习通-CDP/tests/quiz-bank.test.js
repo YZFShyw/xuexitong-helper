@@ -1495,7 +1495,10 @@ test('题库码去重：同一题的不同写法只带一份', () => {
 
 /* ---------------- 前缀+选项集合键（2026-10-18，题干尾部被改写的兜底） ---------------- */
 
-test('前缀键：题干尾部被改写（前 40 字与选项集合相同）→ 兜底命中（viaPrefix）', () => {
+test('前缀键：题干尾部被追加内容 → 不命中（宁漏不错，2026-10-22 codex 复核）', () => {
+  /* 原来这里断言"尾部被改写也能命中"。codex 指出这正是错配来源：
+     共同题干很长、只有末尾「正确/错误」不同的两道判断题，前 40 字与选项集合完全一样，
+     旧前缀键会把它们当成同一道题。现在尾部 12 字也进键，于是"尾部被追加内容"不再命中。 */
   const k = 'c'.repeat(32);
   const longStem = 'X'.repeat(60);
   const bank = bankFromEntries({ [k]: mkOne(k, longStem, 'A') });
@@ -1503,8 +1506,23 @@ test('前缀键：题干尾部被改写（前 40 字与选项集合相同）→ 
     type: '单选', stem: longStem.slice(0, 45) + '（平台改写）',
     options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
   };
+  assert.equal(QB.lookup(bank, '', '单选', page), null,
+    '尾部被追加内容时宁可不命中（否则"正确/错误"这类题会拿到对方答案）');
+});
+
+test('前缀键：头尾一致、只是大小写不同 → 仍命中（viaPrefix）', () => {
+  const k = 'e'.repeat(32);
+  const longStem = 'Z'.repeat(60);
+  const bank = bankFromEntries({ [k]: mkOne(k, longStem, 'A') });
+  const page = {
+    /* 中间换成小写（normalizeForFp 会统一小写）——头 40 字与末尾 12 字都不变。
+       注意：前缀键不吃"题号"（`1. xxx` 会改变前 40 字，题号由别名键负责），
+       也不吃标点差异（normalizeForFp 只做全角→半角+小写，不剔标点）。 */
+    type: '单选', stem: longStem.replace('Z'.repeat(10), 'z'.repeat(10)),
+    options: [{ letter: 'A', text: '甲' }, { letter: 'B', text: '乙' }],
+  };
   const h = QB.lookup(bank, '', '单选', page);
-  assert.ok(h, '应通过前缀键命中');
+  assert.ok(h, '头尾一致（只是大小写不同）应当命中');
   assert.equal(h.viaPrefix, true, '要标明走的是前缀键');
   assert.equal(h.answer, 'A');
 });

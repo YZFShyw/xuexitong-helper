@@ -2674,7 +2674,7 @@ const DOC_STEP = `(function(){
         '[' + stamp() + ']  ' + (rec.chapter || '(章节读不到)') + '\r\n' +
         '    题型：' + (rec.type || '(未知)') + '\r\n' +
         '    题干：' + String(rec.stem || '').replace(/\s+/g, ' ').slice(0, 180) + '\r\n' +
-        (rec.options && rec.options.length ? ('    选项：' + rec.options.join('  ') + '\r\n') : '') +
+        (rec.options && rec.options.length ? ('    选项：' + rec.options.map((op) => (op && typeof op === 'object') ? ((op.letter || '?') + '. ' + (op.text == null ? '' : String(op.text))) : String(op)).join('  ') + '\r\n') : '') +
         '    原因：' + (rec.why || '未知') + '\r\n\r\n', 'utf8');
     } catch (e) { /* 写不进去也不能打断驱动 */ }
   }
