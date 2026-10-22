@@ -3734,7 +3734,11 @@ function makeHelper(cfg, deps) {
                     let fillErr = '';
                     let fillReport = null;
                     try {
-                      fillMsg = await fillFromText(evFn, a.text, shotN, {
+                      /* 【题号重编】部分命中时 indexMap 只有几条，而 AI 按"原题号"回答
+                         （比如只剩第 7 题就答「7. B」）→ idxMap[6] 越界 → 全被跳过，
+                         看起来像"抄录失败"。renumberAnswers 把 7. 重编成 1. 再填。
+                         全拍（无 indexMap）时答案本来就是 1..N，重编等于不改。 */
+                      fillMsg = await fillFromText(evFn, renumberAnswers(a.text), shotN, {
                         /* 【部分命中：把"第 k 条答案"换算成页面题号】不传（全拍）时行为不变 */
                         indexMap: shotOnly || undefined,
                         reopenQuiz, clickAt,
