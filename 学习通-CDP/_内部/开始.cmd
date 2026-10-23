@@ -2,6 +2,7 @@
 chcp 936 >nul
 setlocal enabledelayedexpansion
 title 学习通助手 - 开始
+set "BATCHDIR=%~dp0.."
 cd /d "%~dp0.."
 rem ------------------------------------------------------------
 rem Prefer the node bundled in this folder (node\node.exe).
