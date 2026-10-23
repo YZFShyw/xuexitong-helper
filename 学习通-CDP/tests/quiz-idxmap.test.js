@@ -75,3 +75,28 @@ test('没有 indexMap/origMap 时行为不变（答案就是 1..N）', async () 
   await Q.fillFromText(ev, '1. A\n2. B\n3. C', 3, {});
   assert.deepEqual(asked, [0, 1, 2], '整章截图的老路径一个字都不许变（HINT 是 0 起索引）');
 });
+
+/* 【部分命中：抄录题号 ≠ 页面题号 · 2026-10-23 确认的 bug】
+   splitTranscribed 按【题型】切、题号重编 1..k；hitMap 的键是页面题号。
+   部分命中时截图只拍缺的那几道（shotOnly 存页面 0 起索引），不换算就会把缺题吞掉。 */
+test('partToPageNo：抄录第 k 段 → 页面第几题', () => {
+  assert.equal(Q.partToPageNo(null, 1), 1, '整章全拍：第 1 段就是第 1 题');
+  assert.equal(Q.partToPageNo(null, 8), 8, '整章全拍：第 8 段就是第 8 题');
+  assert.deepEqual(
+    [1, 2, 3].map((k) => Q.partToPageNo([2, 5, 7], k)),
+    [3, 6, 8],
+    '只拍第 3/6/8 题时，三段分别对应页面第 3、6、8 题'
+  );
+  assert.deepEqual(
+    [1, 2].map((k) => Q.partToPageNo([9, 10], k)),
+    [10, 11],
+    '只拍最后两题时对应第 10、11 题'
+  );
+});
+
+test('splitTranscribed 的题号是"本批第几段"（重编 1..k），所以必须换算', () => {
+  const txt = '【多选题】已知电路如图，问该电路可以实现的功能\nA. 甲\nB. 乙\n【多选题】另一道\nA. 丙\nB. 丁';
+  const parts = Q.splitTranscribed(txt);
+  assert.equal(parts.length, 2);
+  assert.deepEqual(parts.map((p) => p.no), [1, 2], '按出现顺序重编，不是页面题号');
+});

@@ -1179,6 +1179,15 @@ function titleShotPlan() {
 }
 
 /* 把抄录文本按"题号 + 【题型】"切成逐题段落（部分命中时只把 miss 题发给 AI，题号保持原样） */
+/* 【抄录的第 k 段 → 页面第几题（1 起）· 2026-10-23】
+   splitTranscribed 按【题型】切、题号一律重编成 1..k；而 hitMap / origMap 用的是页面题号。
+   部分命中时截图只拍了缺的那几道（shotOnly 存的是页面 0 起索引），必须换算再对。
+   shotOnly 为空（整章全拍）时第 k 段就是第 k 题，原样返回。 */
+function partToPageNo(shotOnly, no) {
+  if (Array.isArray(shotOnly) && shotOnly[no - 1] != null) return shotOnly[no - 1] + 1;
+  return no;
+}
+
 function splitTranscribed(txt) {
   const out = [];
   const src = String(txt == null ? '' : txt);
@@ -1187,7 +1196,10 @@ function splitTranscribed(txt) {
   const re = /【(?:单选|多选|判断)题】/g;
   let m, last = null;
   while ((m = re.exec(src))) {
-    if (last) out.push({ no: out.length + 1, text: src.slice(last, m.index).trim() });
+    /* 【`last !== null` 不是 `if (last)` · 2026-10-23 测试揪出来】第一次匹配的 index 是 0
+       （抄录以【题型】开头——最常见的形式），`if (0)` 是假值 → 第一道题直接丢掉。
+       实测：两段抄录只切出 1 段，而且丢的是**第 1 题**。 */
+    if (last !== null) out.push({ no: out.length + 1, text: src.slice(last, m.index).trim() });
     last = m.index;
   }
   if (last != null) out.push({ no: out.length + 1, text: src.slice(last).trim() });
@@ -3693,9 +3705,17 @@ function makeHelper(cfg, deps) {
                   a = presetA;
                 } else if (hitMap && Object.keys(hitMap).length) {
                   const parts0 = splitTranscribed(t.text);
-                  const missParts = parts0.filter((p0) => !hitMap[p0.no]);
-                  /* 题号写回（AI 按原题号作答；部分命中时只发这些题） */
-                  const missText = missParts.map((p0) => p0.no + '. ' + p0.text).join('\n');
+                  /* 【抄录题号 ≠ 页面题号 · 2026-10-23 确认的 bug】
+                     splitTranscribed 按【题型】切、题号一律重编成 1..k（见它自己的注释）；
+                     而 hitMap 的键是**页面题号**（i0+1）。部分命中时截图只拍了缺的那几道
+                     （shotOnly），于是"第 1 段"其实是页面第 shotOnly[0]+1 题。
+                     实测推演：页面 10 题、缺第 3/6/8 题时 hitMap 里有 1、2 →
+                     前两段被当成"已命中"过滤掉，缺的题直接被吞。
+                     这里统一换算：第 k 段 → 页面第 shotOnly[k-1]+1 题（无 shotOnly 时不变）。 */
+                  const pageNoOf = (p0) => partToPageNo(shotOnly, p0.no);
+                  const missParts = parts0.filter((p0) => !hitMap[pageNoOf(p0)]);
+                  /* 题号写回（AI 按**页面题号**作答；部分命中时只发这些题） */
+                  const missText = missParts.map((p0) => pageNoOf(p0) + '. ' + p0.text).join('\n');
                   lines.push('  → 题图指纹：' + Object.keys(hitMap).length + ' 题命中题库（不提交 AI），剩余 ' + missParts.length + ' 题问模型');
                   if (missText) {
                     const aiA = await askRaw(ANSWER_FROM_TEXT + '\n\n' + missText, cfg);
@@ -4232,7 +4252,7 @@ module.exports = {
   loadConfig, saveConfig, makeHelper, parseAnswer,
   decodeObf, hasFontTable, loadFontTable, fontTableMatches,
   /* 下面几个是为了能单独测"截图读题"和"填进页面"这两条路而导出的 */
-  grabShots, transcribeShots, scrollToQuestion, countQuestions, askRaw, askWithShots, titleShotPlan,
+  grabShots, transcribeShots, splitTranscribed, partToPageNo, scrollToQuestion, countQuestions, askRaw, askWithShots, titleShotPlan,
   fillAct, tryFill, fillFromText, stFilled, JUDGE_SYN, saveDraft, saveProbe, questionShotPlan,
   modelMigrationNote, DEAD_MODELS,
   DEFAULT_CFG, FONT_TABLE,
