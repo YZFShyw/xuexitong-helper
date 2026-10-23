@@ -55,16 +55,19 @@ test('AI 按这批第几条答（1./2.）→ 回退 indexMap，仍填第 10、11
   assert.deepEqual(asked, [9, 10], '顺序号要走 indexMap 回退');
 });
 
-test('AI 跳号（1.A、3.B）→ 只填第 10 题，第 3 条跳过（绝不错位到第 11 题）', async () => {
+test('AI 跳号（1.A、3.B）→ 两条都不填（max(n)>k ⇒ 判成原题号、又对不上 → 全跳过，宁漏不错位）', async () => {
+  /* 2026-10-23 改：`max(n) > 答案条数` 说明 AI 给的是页面原题号（批号不可能超过条数）。
+     这里 pool=2、AI 写了「3.」→ 判成原题号 → origMap 里没有 3（只有 10、11）→ 全跳过。
+     保守是刻意的：宁可漏答记欠账，也不把第三题的答案填到第二题。 */
   const { ev, asked } = makeEv(14);
   let rep = null;
   const msg = await Q.fillFromText(ev, '1. A\n3. B', 2, {
     indexMap: MAP.idx, origMap: MAP.orig, onResult: (r) => { rep = r; },
   });
-  assert.deepEqual(asked, [9], '跳号的那条不许填成下一题');
-  assert.match(msg, /填进页面|已按顺序/, '要如实报告填了哪几道');
-  assert.equal(rep && rep.filled, 1);
-  assert.ok(rep && rep.skipped >= 1, '跳过的那条要记进 skipped');
+  assert.deepEqual(asked, [], '题号对不上就一条都不填');
+  assert.equal(rep && rep.filled, 0);
+  assert.ok(rep && rep.skipped >= 1, '跳过要如实记账');
+  assert.match(msg, /跳过/, '结论里要写清跳过');
 });
 
 test('没有 indexMap/origMap 时行为不变（答案就是 1..N）', async () => {

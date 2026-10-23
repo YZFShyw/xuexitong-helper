@@ -599,12 +599,26 @@ const EXTRACT = `(function () {
         for (var oi = 0; oi < opts.length; oi++) if (!opts[oi].letter) opts[oi].letter = String.fromCharCode(65 + oi);
       }
 
+      /* 【题型：先看页面自己写的，再看 DOM 结构 · 2026-10-23 子代理实证】
+         作业页的多选用 li 承载（不是 input[type=checkbox]），原来那条 DOM 判据会把
+         「(多选题)」判成单选 → 发给模型的题型是"单选" → 它只回一个字母。
+         实测：记录里带题型标注的 385 道有 59 道判错（全是多选被判成单选）。
+         顺序：填空/简答的强特征 → 题干里明写的「(多选题)」→ DOM 弱特征 → 兜底单选。 */
       var type = '未知';
       if (q.querySelector('textarea, [contenteditable="true"], iframe[id^="ueditor"]')) type = '简答';
       else if (q.querySelector('.blankItemDiv')) type = '填空';
-      else if (q.querySelector("input[type='checkbox'], li[role='checkbox']")) type = '多选';
-      else if (opts.length && opts.every(function (o) { return /^(对|错|正确|错误|是|否|T|F)$/i.test(o.text.trim()); })) type = '判断';
-      else if (opts.length) type = '单选';
+      else {
+        var rawType = '';
+        try {
+          var txAll = String(q.innerText || q.textContent || '');
+          var mtType = txAll.match(/[（(]\s*(单选|多选|判断)\s*题?\s*[)）]/);
+          if (mtType) rawType = mtType[1];
+        } catch (eType) { rawType = ''; }
+        if (rawType) type = rawType;
+        else if (q.querySelector("input[type='checkbox'], li[role='checkbox']")) type = '多选';
+        else if (opts.length && opts.every(function (o) { return /^(对|错|正确|错误|是|否|T|F)$/i.test(o.text.trim()); })) type = '判断';
+        else if (opts.length) type = '单选';
+      }
 
       if (stem || opts.length) {
         /* font-cxsecret 是超星的字体反爬：DOM 里存的是替换字符，
@@ -615,10 +629,17 @@ const EXTRACT = `(function () {
     }
   }
 
-  /* 去掉重复（有些容器会被父子各抓一次） */
+  /* 去掉重复（有些容器会被父子各抓一次）
+     【键要带图片身份 · 2026-10-23 子代理指出】原来只用"题干前 60 字 + 选项数"：
+     同页两道"文字完全一样、只有配图不同"的题（作业第 10/11 题就是这种）会被当成一道丢掉，
+     之后所有按页面序号做的映射（indexOf / shotOnly / hitMap / visionMissed）整体前移 → 填错题。
+     现在把题干里图片的 src 也拼进键（无图题键不变，老行为照旧）。 */
   var uniq = [], keys = {};
   for (var u = 0; u < questions.length; u++) {
-    var key = (questions[u].stem || '').slice(0, 60) + '|' + questions[u].options.length;
+    var imgKey = (questions[u].imgs && questions[u].imgs.length)
+      ? questions[u].imgs.map(function (s) { return String(s).split('/').pop(); }).join(',')
+      : '';
+    var key = (questions[u].stem || '').slice(0, 60) + '|' + questions[u].options.length + '|' + imgKey;
     if (keys[key]) continue;
     keys[key] = 1; uniq.push(questions[u]);
   }
@@ -651,10 +672,13 @@ function parseAnswer(text, type) {
   if (/不确定/.test(first)) return { answer: null, reason: reason || first };
 
   if (type === '判断') {
-    /* 【先剥掉题号再认对错 · 2026-10-23】原来直接 /^(对|正确|是|真|T|TRUE|√|1)/ 匹配整行：
-       模型第一行写「1. 错」（带题号）时，第一个字符是 `1` → 被判成"对" —— **答反**。
-       现在先去掉开头的 `1.` / `2、` 这类题号，再按"中文字 > T/F > 单独的 1/0"的顺序判。 */
-    const t2 = first.replace(/^\s*\d{1,2}\s*[.、)）]\s*/, '');
+    /* 【先剥掉"答案："和题号再认对错 · 2026-10-23】
+       两个坑：① 模型第一行写「1. 错」（带题号）时，第一个字符是 `1` → 原来会被判成"对"；
+       ② 写「答案：错」时前缀剥不掉 → 认不出 → 记成"模型无法确定"。
+       现在先剥 `答案|选|选项[:：]`，再剥 `1.` 这类题号，最后按"中文字 > T/F > 单独的 1/0"判。 */
+    const t2 = first
+      .replace(/^\s*(?:答案|选|选项)\s*[:：]?\s*/, '')
+      .replace(/^\s*\d{1,2}\s*[.、)）]\s*/, '');
     if (/^(对|正确|是|真|√)/.test(t2)) return { answer: '对', reason };
     if (/^(错|错误|否|假|×)/.test(t2)) return { answer: '错', reason };
     if (/^(T|TRUE)\b/i.test(t2)) return { answer: '对', reason };
@@ -662,7 +686,12 @@ function parseAnswer(text, type) {
     if (/^1\s*$/.test(t2)) return { answer: '对', reason };
     if (/^0\s*$/.test(t2)) return { answer: '错', reason };
   }
-  const letters = [...new Set((first.toUpperCase().match(/[A-H]/g) || []))].sort();
+  /* 【只认"答案段"，不认整行 · 2026-10-23】原来把整行所有 A-H 都收进来：
+     模型写「B，因为 A 项错误」→ letters=[A,B] → 单选取 A（答错）；多选还会多出 C/E。
+     现在剥掉"答案："前缀后，只从行首连续取"字母 + 标点分隔符"那一段，遇到别的字就停。 */
+  const headSeg = first.replace(/^\s*(?:答案|选|选项)\s*[:：]?\s*/, '');
+  const seg = (headSeg.match(/^[A-Ha-h](?:[\s,，、;；.．\/和及与]*[A-Ha-h]){0,7}/) || [''])[0];
+  const letters = [...new Set((seg.toUpperCase().match(/[A-H]/g) || []))].sort();
   if (letters.length === 0) {
     if (type === '填空' || type === '简答') return { answer: first, reason };
     return { answer: null, reason: reason || '（模型第一行没有可识别的答案）' };
@@ -1445,7 +1474,16 @@ const ANSWER_FROM_TEXT = [
    "截图 + 抄录文字一起发过去"，不再"先抄成文字、再拿文字去问"。
    返回结构与 askRaw 同构：{ text, usage, empty, note, attempts }。 */
 async function askWithShots(cfg, shots, text) {
-  const content = [{ type: 'text', text: ANSWER_FROM_TEXT + '\n\n' + String(text || '') }];
+  /* 【题号规则写死在提示里】截图里每道题前面本来就有题号（「10.」「11.」），
+     模型却常常自作主张按"这一批的第几道"重新编号（1. / 2.）——两种编号会撞车
+     （只截第 3、5、7 题时，"3"既可能是页面第 3 题、也可能是本批第 3 道）。
+     这里明确要求用画面上的题号，配合 fillFromText 的 max(n)>pool 判据双保险。 */
+  const content = [{
+    type: 'text',
+    text: ANSWER_FROM_TEXT + '\n\n' +
+      '【题号规则】请按截图里每道题**前面的那个题号**回答（画面写着「10.」就用 10），' +
+      '不要按"这一批的第几道"重新编号。\n\n' + String(text || ''),
+  }];
   for (const b of (shots || [])) {
     if (!b) continue;
     content.push({ type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + b } });
@@ -1873,13 +1911,22 @@ async function fillFromText(ev, text, domCount, deps) {
      「第 k 条 ↔ indexMap[k]」；两边都对不上就**跳过**（宁漏不错位）。 */
   const origMap = (deps && deps.origMap && typeof deps.origMap === 'object') ? deps.origMap : null;
   if (idxMap || origMap) {
+    const pool = idxMap ? idxMap.length : (origMap ? Object.keys(origMap).length : 0);
+    /* 【先判"这批编号到底是哪一种" · 2026-10-23 子代理离线复现的撞车】
+       只截了页面第 3、5、7 题时 origMap={3:2,5:4,7:6}，而 AI 也可能按"本批第几条"答「3. C」——
+       两种编号都写 3，无条件优先原题号就会把第 3 题填成第 7 题的答案（复现：asked=[1,1]）。
+       判据：**批号不可能超过答案条数**。max(n) > pool ⇒ 一定是页面原题号，用 origMap；
+       否则按"本批第几条"处理，走 indexMap。两边都对不上就跳过（宁漏不错位）。 */
+    const ns = picks.map((p) => p.n);
+    const maxN = ns.length ? Math.max.apply(null, ns) : 0;
+    const looksLikeOrig = !!(origMap && maxN > pool);
     for (let i = picks.length - 1; i >= 0; i--) {
       const p = picks[i];
       let real = null;
-      if (origMap && origMap[p.n] != null) real = origMap[p.n];
+      if (looksLikeOrig) real = (origMap[p.n] != null) ? origMap[p.n] : null;
       else if (idxMap && idxMap[p.idx] != null) real = idxMap[p.idx];
+      else if (origMap && origMap[p.n] != null && maxN > pool) real = origMap[p.n];
       if (real == null) {
-        const pool = idxMap ? idxMap.length : (origMap ? Object.keys(origMap).length : 0);
         skippedMsg.push('第' + p.n + '条答案=「' + p.raw + '」（这次只截了 ' + pool +
           ' 道题，多出来的答案没填；题号对不上，宁可不填也不错位）');
         picks.splice(i, 1);
@@ -2093,6 +2140,17 @@ async function tryFill(ev, rawStem, answer, type, clickAt, opts) {
     return '点了但没选中：' + un.join('') + '（aria-checked 还是 false，得手动点一下）';
   }
   return '部分选中：' + sel.join('') + ' 成功；' + un.join('') + ' 没选中';
+}
+
+/* 【"真的填上了"的统一判据 · 2026-10-23 子代理实证】
+   原来三处记账只判 `st.indexOf('没填上') >= 0 || st.indexOf('没填') >= 0`，
+   于是「点了但没选中」「部分选中：A 成功；B 没选中」这两种**没填成**的结论都不含"没填上"，
+   全部走进 else → noteFilled()。实测记录里 146 次"点了但没选中"、23 次"部分选中"都被记成了填上。
+   现在：必须明确出现"已选中/已按顺序填进页面/已写进"，且不含任何失败字样，才算填上。 */
+function stFilled(st) {
+  const s = String(st || '');
+  if (/没选中|没填上|部分选中|没能从|所以没填|没写进/.test(s)) return false;
+  return /已选中|已按顺序填进页面|已写进/.test(s);
 }
 
 /* ==================================================================
@@ -3299,7 +3357,7 @@ function makeHelper(cfg, deps) {
             if (cfg.autoFill && !r.graded) {
               const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt, { idx: r.questions.indexOf(q), total: r.questions.length });
               lines.push('      → ' + st);
-              if (st.indexOf('没填上') >= 0 || st.indexOf('没填') >= 0) {
+              if (!stFilled(st)) {
                 noteMiss(q, '题库答案「' + hit.answer + '」填不进页面：' + st);
               } else {
                 noteFilled();
@@ -3364,7 +3422,7 @@ function makeHelper(cfg, deps) {
             if (cfg.autoFill && !r.graded) {
               const st = await tryFill(evFn, q.stem, hit.answer, q.type, clickAt, { idx: r.questions.indexOf(q), total: r.questions.length });
               lines.push('      → ' + st);
-              if (st.indexOf('没填上') >= 0 || st.indexOf('没填') >= 0) {
+              if (!stFilled(st)) {
                 noteMiss(q, '题库答案「' + hit.answer + '」填不进页面：' + st);
               } else {
                 noteFilled();
@@ -3985,7 +4043,7 @@ function makeHelper(cfg, deps) {
               } else {
                 const st = await tryFill(evFn, q.stem, p.answer, q.type, clickAt, { idx: r.questions.indexOf(q), total: r.questions.length });
                 lines.push('      → ' + st);
-                if (st.indexOf('没填上') >= 0 || st.indexOf('没填') >= 0) {
+                if (!stFilled(st)) {
                   noteMiss(q, '答案「' + p.answer + '」填不进页面：' + st);
                 } else {
                   noteFilled();      /* 只有"真填上了"才走到这里 */
@@ -4140,7 +4198,10 @@ function makeHelper(cfg, deps) {
         lines.push('     ↳ 看图补漏结果：补上 ' + vBack + ' / ' + vN + ' 道' +
           (vBack >= vN ? ' ✓' : '（其余的照旧记进"没做的题"）'));
       }
-      if (cfg.autoFill && !r.graded && obfN > 0) {
+      /* 【保存条件 · 2026-10-23 子代理实证】原来多一个 `obfN > 0`（只有字体反爬的页才保存）：
+         作业页没有字体反爬 → 勾完从来不点「暂时保存」→ 一离开就全丢。
+         实测 10/21 三次作业记录：24 条填充、0 条保存。现在只要开了自动填、且没交过，就保存。 */
+      if (cfg.autoFill && !r.graded) {
         /* 【保存这一步单独兜错】原来这里是 `catch (e) {}` ——
            "保存失败"和"保存成功"在日志里长得一模一样。现在如实记进保存账目。 */
         let sr = null;
@@ -4172,7 +4233,7 @@ module.exports = {
   decodeObf, hasFontTable, loadFontTable, fontTableMatches,
   /* 下面几个是为了能单独测"截图读题"和"填进页面"这两条路而导出的 */
   grabShots, transcribeShots, scrollToQuestion, countQuestions, askRaw, askWithShots, titleShotPlan,
-  fillAct, tryFill, fillFromText, JUDGE_SYN, saveDraft, saveProbe, questionShotPlan,
+  fillAct, tryFill, fillFromText, stFilled, JUDGE_SYN, saveDraft, saveProbe, questionShotPlan,
   modelMigrationNote, DEAD_MODELS,
   DEFAULT_CFG, FONT_TABLE,
   /* ---- 2026-10 新增（都是加法，老的导出一个没动）----
