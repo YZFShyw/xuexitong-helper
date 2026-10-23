@@ -3133,10 +3133,29 @@ function makeHelper(cfg, deps) {
          两个出口：
            a) cfg.onUnanswered —— 每漏一道就回调一次（驱动器拿去写界面）
            b) cfg.stats —— 累计数字，驱动器收尾时打总结 */
+      /* 【同一道题只记一次欠账 + 不再重复计数 · 2026-10-23 核实到根因】
+         实证（归档日志 18:54:49 那章 10 道题）：
+             题目计数行：found=10  filled=0  missed=20
+             本章《2.4 章节测验》10 道题，本轮欠 20 道
+         10 道题记出 20 道欠账，原因有两个：
+         ① 同题会被 noteMiss 两次（"填不进页面"一次、别处再一次）→ 按题面指纹去重；
+         ② **这里是主因**：原来既 `cfg.stats.missed++`，又调 `cfg.onUnanswered(...)`，
+            而 driver 的 recordMiss 里**也** `quizStats.missed++` —— 两者是同一个对象
+            （attachQuizBookkeeping 把 cfg.stats 直接赋成 quizStats），于是每题加两次。
+         现在：有 onUnanswered 就交给它记（driver 那份），没有回调时才兜底自己加。
+         既有的 found 加数也去掉了 —— found 由探针数（qr.found）算。 */
+      const missedOnce = new Set();
       const noteMiss = (q, whyMiss) => {
         try {
-          if (cfg.stats) {
-            cfg.stats.found = (cfg.stats.found || 0) + 1;
+          let fpKey = '';
+          try {
+            if (q) fpKey = fp.fpOf({ type: q.type, stem: q.stem, options: q.options });
+          } catch (e) { fpKey = ''; }
+          if (fpKey) {
+            if (missedOnce.has(fpKey)) return;
+            missedOnce.add(fpKey);
+          }
+          if (typeof cfg.onUnanswered !== 'function' && cfg.stats) {
             cfg.stats.missed = (cfg.stats.missed || 0) + 1;
           }
           if (typeof cfg.onUnanswered === 'function') {

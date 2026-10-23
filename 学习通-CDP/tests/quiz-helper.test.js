@@ -184,16 +184,19 @@ function makeFakePage(opt) {
 }
 
 /* 假网络：只认模型名，只回假 JSON。**一个真实请求都不发。** */
-function fakeNet(log) {
+function fakeNet(log, opt) {
   return async (url, opts) => {
     let body = {};
     try { body = JSON.parse(String((opts && opts.body) || '{}')); } catch (e) {}
     const kind = body.model === 'fvm' ? 'transcribe' : (body.model === 'fm' ? 'answer' : 'other');
     log.push({ kind: kind, url: String(url), model: body.model });
     if (kind === 'other') throw new Error('测试里不该出现没预料到的请求：' + JSON.stringify(body).slice(0, 120));
-    const content = kind === 'transcribe'
-      ? '【单选题】下列说法正确的是\nA. 甲\nB. 乙\n【单选题】下面哪个对\nA. 丙\nB. 丁'
-      : '1. A —— 理由略\n2. B —— 理由略';
+    /* opt.content 可以覆盖"问答案"那一轮的回复（用来构造"模型答不确定"这类场景） */
+    const content = (opt && opt.content && kind === 'answer')
+      ? opt.content
+      : (kind === 'transcribe'
+        ? '【单选题】下列说法正确的是\nA. 甲\nB. 乙\n【单选题】下面哪个对\nA. 丙\nB. 丁'
+        : '1. A —— 理由略\n2. B —— 理由略');
     return {
       ok: true, status: 200, __apiAttempts: 1,
       json: async () => ({
@@ -233,7 +236,7 @@ async function runHandle(o) {
   const page = makeFakePage(o);
   const netLog = [];
   const built = makeCfg(o.cfg);
-  globalThis.fetch = fakeNet(netLog);
+  globalThis.fetch = fakeNet(netLog, o);
   const helper = quiz.makeHelper(built.cfg, {
     ev: page.ev, shot: page.shot, clickAt: page.clickAt, reopenQuiz: null
   });
@@ -535,3 +538,4 @@ test('parseAnswer 多选：各种分隔写法都要取全字母', () => {
   assert.equal(quiz.parseAnswer('BAD', '多选').answer, 'ABD', '乱序按字母序输出');
   assert.equal(quiz.parseAnswer('B', '单选').answer, 'B');
 });
+

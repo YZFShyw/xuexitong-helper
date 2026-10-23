@@ -4380,6 +4380,14 @@ const DOC_STEP = `(function(){
           } catch (e) {
             log('  ↳ 答题助手出错：' + (e && e.message ? e.message : e));
           } finally {
+            /* 【答题耗时不能算进"零推进" · 2026-10-23 核实有实证】
+               4224 那句 `if (quizBusy) lastProgressAt = Date.now()` 是死代码：主循环在
+               `await handle` 期间根本不迭代，等它返回时 idleMs 早就超标。归档日志实锤：
+                 [19:03:39] 题目小结：遇到 30 道，填上 10 道，没做成 20 道
+                 [19:05:41] ⚠ 已经 91 秒没有任何进展（最后一步：刚开始）
+               之后每 2 分钟强推一次、连了 15 轮。这里在 handle 结束的瞬间真重置一次计时器。
+               纯增量，不改任何判定。 */
+            try { markProgress('答题结束：' + (s.chapter || lastChapter)); } catch (e) {}
             /* 放在 finally 里：handle 中途抛错时，noteMiss 可能已经记过欠账了，
                不能因为抛错就把这一章的账整个丢掉（那又变回"账目空白"）。
                但闸门拦下时**一个字都不记** —— 那正是它要拦的东西。 */
