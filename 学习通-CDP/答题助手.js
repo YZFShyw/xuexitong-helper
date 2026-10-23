@@ -651,8 +651,16 @@ function parseAnswer(text, type) {
   if (/不确定/.test(first)) return { answer: null, reason: reason || first };
 
   if (type === '判断') {
-    if (/^(对|正确|是|真|T|TRUE|√|1)/i.test(first)) return { answer: '对', reason };
-    if (/^(错|错误|否|假|F|FALSE|×|0)/i.test(first)) return { answer: '错', reason };
+    /* 【先剥掉题号再认对错 · 2026-10-23】原来直接 /^(对|正确|是|真|T|TRUE|√|1)/ 匹配整行：
+       模型第一行写「1. 错」（带题号）时，第一个字符是 `1` → 被判成"对" —— **答反**。
+       现在先去掉开头的 `1.` / `2、` 这类题号，再按"中文字 > T/F > 单独的 1/0"的顺序判。 */
+    const t2 = first.replace(/^\s*\d{1,2}\s*[.、)）]\s*/, '');
+    if (/^(对|正确|是|真|√)/.test(t2)) return { answer: '对', reason };
+    if (/^(错|错误|否|假|×)/.test(t2)) return { answer: '错', reason };
+    if (/^(T|TRUE)\b/i.test(t2)) return { answer: '对', reason };
+    if (/^(F|FALSE)\b/i.test(t2)) return { answer: '错', reason };
+    if (/^1\s*$/.test(t2)) return { answer: '对', reason };
+    if (/^0\s*$/.test(t2)) return { answer: '错', reason };
   }
   const letters = [...new Set((first.toUpperCase().match(/[A-H]/g) || []))].sort();
   if (letters.length === 0) {

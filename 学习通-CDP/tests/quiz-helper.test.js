@@ -515,3 +515,23 @@ test('隔离：缓存文件只写临时位置（用"换路径 + 看谁被写"验
       '跑 handle 期间缓存绝不能指向用户那份（还原由上面那条独立用例看）');
   });
 });
+
+/* 【判断题带题号时答反 · 2026-10-23 本鱼复核发现】parseAnswer('1. 错', '判断') 原来命中
+   /^(对|...|1)/ 的 `1` → 返回"对"，把错误答案填上去。现在先剥题号再判对错。 */
+test('parseAnswer 判断题：模型第一行带题号时不能答反', () => {
+  assert.equal(quiz.parseAnswer('1. 错', '判断').answer, '错');
+  assert.equal(quiz.parseAnswer('2、对', '判断').answer, '对');
+  assert.equal(quiz.parseAnswer('错', '判断').answer, '错');
+  assert.equal(quiz.parseAnswer('对', '判断').answer, '对');
+  assert.equal(quiz.parseAnswer('1', '判断').answer, '对', '整行只有 1 仍按"对"处理');
+  assert.equal(quiz.parseAnswer('0', '判断').answer, '错', '整行只有 0 仍按"错"处理');
+  assert.equal(quiz.parseAnswer('1. 不确定', '判断').answer, null, '带题号的不确定也不许硬猜');
+});
+
+test('parseAnswer 多选：各种分隔写法都要取全字母', () => {
+  assert.equal(quiz.parseAnswer('ABD', '多选').answer, 'ABD');
+  assert.equal(quiz.parseAnswer('A,B,D', '多选').answer, 'ABD');
+  assert.equal(quiz.parseAnswer('A、B、D', '多选').answer, 'ABD');
+  assert.equal(quiz.parseAnswer('BAD', '多选').answer, 'ABD', '乱序按字母序输出');
+  assert.equal(quiz.parseAnswer('B', '单选').answer, 'B');
+});
