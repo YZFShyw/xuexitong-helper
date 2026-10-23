@@ -3463,7 +3463,14 @@ const DOC_STEP = `(function(){
     quizStampedChapters.add(chapter);
     quizBusy = true;   /* 从这一刻起主循环只等不动，直到下面 finally 放开 */
     try {
-      return await runQuiz(chapter, tail);
+      const rq = await runQuiz(chapter, tail);
+      /* 【没做成要撤章 · 2026-10-23 子代理指出 P0】"盖过章"= 本轮不再试这一章。
+         可 runQuiz 返回 'none' 的含义是"这次根本没做成"（work 卡 iframe 还没挂回来、
+         切栏失败、6 次探针全空）—— 那是**暂时**的，不是"这章没题"。原来的写法是
+         盖章在前、结果在后，'none' 也不撤 → 这一章本轮永久 skipped，
+         连 TAB_SELFHEAL 切回栏也救不回来。现在：只有真的做成了（不是 'none'）才留章。 */
+      if (rq === 'none') quizStampedChapters.delete(chapter);
+      return rq;
     } finally {
       quizBusy = false;
     }
@@ -3576,7 +3583,15 @@ const DOC_STEP = `(function(){
       } catch (e) {
         log('  ↳ 答题助手出错：' + (e && e.message ? e.message : e));
       }
-      result = 'handled';
+      /* 【助手抛错不能算"做完了"】原来无条件 result='handled'：handle 抛异常时 lines=null，
+         下面 `lines && !didFill && didNot` 不成立 → 没填却记成"已填"、本轮不再重试。
+         现在拿不到结论就记 'error'。 */
+      if (!lines) {
+        result = 'error';
+        log('  ↳ 答题助手没返回结论（抛错了），这一章按"没做成"记，下一轮还会再试');
+      } else {
+        result = 'handled';
+      }
       /* 【"交代过了"要按"真的填进去了"算，不能按"我试过了"算】
          答题助手会如实报"没能从模型那段答案里认出第几题选什么，所以没填" ——
          这种时候如果还当成 handled，驱动器会以为题做完了直接翻页，
@@ -4367,7 +4382,13 @@ const DOC_STEP = `(function(){
             if (gate === 'continue') {
               quizStats.chapters++;
               quizStats.found += q.found;
-              if (lines) {
+              /* 【只有真填上了才算"填过" · 2026-10-23 子代理指出 P0】
+                 原来这里只判 `if (lines)`：助手明明写着"没填上/点了但没选中"，只要返回了数组
+                 就 quizFilledKeys.add → 这一章本轮不再重试、后面的收口闸门也放行。
+                 口径必须和 tryQuiz 那条路（3591）一致：看结论里有没有"填进页面/已选中"。 */
+              const didFillHere = (lines || []).some((l) =>
+                /已按顺序填进页面|已选中：|已写进/.test(String(l)));
+              if (lines && didFillHere) {
                 quizFilledKeys.add(s.chapter || lastChapter);   /* 填过了，别再填第二遍 */
                 chkSave(s.chapter || lastChapter, { quizFound: q.found });
               }
