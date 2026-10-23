@@ -474,12 +474,16 @@ function cardPullKey(chapter, idx, name) {
 /* ---- 风控提防 END（离线真值表脚本从上面的"风控提防 · 纯函数区"抠到这里）---- */
 
 /* ---------------- 只在运行期间阻止睡眠 ----------------
-   用 Windows 的 SetThreadExecutionState，交给 保持唤醒.ps1 去持这个请求：
-     * 只申请 ES_SYSTEM_REQUIRED（不睡眠）
-     * 故意不申请 ES_DISPLAY_REQUIRED（屏幕照样可以正常息屏）
-     * 请求挂在那个助手进程上，助手一退出就自动解除
-   所以：本程序跑着的时候不会睡；一停就恢复你的电源设置原状，不留任何改动。
-   想关掉这个行为：启动前设 NO_KEEPALIVE=1 */
+   用 Windows 的 SetThreadExecutionState，交给 保持唤醒.ps1 去持这个请求。
+   【实际行为：连显示器一起钉住（ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED）】
+   为什么连屏幕也得钉（2026-10-12 实测）：本机只有 S0 低电量待机（Modern Standby），
+   S3 被 Device Guard 禁用。S0 机型上只申请 SYSTEM 拦不住入睡 ——
+   13:43 挂上请求后，14:01 系统仍以「进入新型待机状态 原因: Idle Timeout」睡了。
+   Modern Standby 的前提是"显示器先关"，所以只有把屏幕也钉住，待机才没有入口。
+   代价：跑驱动器期间屏幕不会自动熄（笔记本更耗电）。
+   想退回"只防睡眠、允许熄屏"：给 保持唤醒.ps1 传 -NoDisplay（有重新睡着的风险）。
+   请求挂在那个助手进程上，助手一退出就自动解除；不动任何电源设置。
+   想彻底关掉这个行为：启动前设 NO_KEEPALIVE=1 */
 let keepProc = null;
 function startKeepAwake() {
   if (process.env.NO_KEEPALIVE === '1') { log('（NO_KEEPALIVE=1，不申请阻止睡眠）'); return; }
@@ -494,7 +498,7 @@ function startKeepAwake() {
        而它自己又在等父进程（我们）死掉才退出 —— 互相等，进程永远退不出来。
        表现就是：日志已经打完「驱动器结束。」，但进程挂着不消失。 */
     if (keepProc && typeof keepProc.unref === 'function') keepProc.unref();
-    log('已申请「运行期间不睡眠」—— 屏幕仍可正常息屏，不动你的电源设置');
+    log('已申请「运行期间不睡眠」—— 屏幕也会保持常亮（S0 机型不钉屏幕就拦不住睡眠），不动你的电源设置');
   } catch (e) {
     log('（申请阻止睡眠失败：' + e.message + '）');
   }
