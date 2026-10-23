@@ -851,7 +851,7 @@ async function pickCoursePage() {
  *   一个视频都没播，日志里全是"没有可播的内容"。
  *
  * 【这一版的第二个坑：岔路要走对】
- *   frame 树实测（chapterId=1227808599，函数微分的定义及几何意义）：
+ *   frame 树实测（某一章的「函数微分的定义及几何意义」，具体 chapterId 已隐去）：
  *     顶层 studentstudy
  *       └─ iframe#iframe              → knowledge/cards        ← 卡片页，这一层躺着 2 个卡片
  *            ├─ iframe.ans-attach-online.insertdoc-online-pdf   → ananas/modules/pdf    （不是播放器）
