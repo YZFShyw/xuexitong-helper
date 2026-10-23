@@ -10,17 +10,17 @@ frame 树实测 + chain() 分支修正说明
 深度用缩进表示；★ 标的是挂着 <video> / .video-js 的那一条分支。
 
 调试端口 9222 上有 2 个 page 标签页：
-  [0] 学生学习页面   https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&clazzid=153929011&cpi=566261411&enc=3f98c…
+  [0] 学生学习页面   https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=<章节号>&courseId=<课程号>&clazzid=<班级号>&cpi=<cpi>&enc=3f98c…
   [1] 个人空间   https://i.chaoxing.com/base?ws=1&t=1790357146898
 
 ══════════════════════════════════════════════════════════════════
 标签页: 学生学习页面
-   URL : https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&clazzid=153929011&cpi=566261411&enc=3f98ca6436f847b69a7397f0cfe66391&mooc2=1&hidetype=0&fanyaVersion=0&openc=9068bf7616f3ed571408a1f504c3a6ae
+   URL : https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=<章节号>&courseId=<课程号>&clazzid=<班级号>&cpi=<cpi>&enc=<enc>&mooc2=1&hidetype=0&fanyaVersion=0&openc=<enc>
     id : B3B6BE86E5377C6B00E219C5AA208E33
 
 --- frame 树（共 15 个 frame）---
 [ 1] └─ text/html  depth=0  frameId=B3B6BE86E5377C6B00E219C5AA208E33
-     url: https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&clazzid=153929011&cpi=566261411&enc=3f98ca6436f847b69a7397f0c…
+     url: https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=<章节号>&courseId=<课程号>&clazzid=<班级号>&cpi=<cpi>&enc=<enc>…
      本层: media=0  .video-js类=0  iframe=7  ready=complete  正文“返回课程 章节详情 函数微分的定义及几何意义 下一节 上一节 目录 讨论 笔记 …”
     [ 2] ├─ name="reportFrame"  text/html  depth=1  frameId=DEDCA2CC1E0E7D19AE626F91CD435B3D
          url: about:blank
@@ -41,7 +41,7 @@ frame 树实测 + chain() 分支修正说明
          url: about:blank
          本层: media=0  .video-js类=0  iframe=0  ready=complete
     [ 8] ├─ name="iframe"  text/html  depth=1  frameId=F6477F3958440080BA8102BAEE490899   ★ <AUDIO>
-         url: https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&knowledgeid=1227808599&num=0&ut=s&cpi=&v=2025-0424-1038-3&moo…
+         url: https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=<班级号>&courseId=<课程号>&knowledgeid=1227808599&num=0&ut=s&cpi=&v=2025-0424-1038-3&moo…
          本层: media=1  .video-js类=0  iframe=2  ready=complete  正文“学习目标： 1,什么是微分？可微是什么意思？ 2,函数具有什么性质才可微？ 3,…”
         [ 9] ├─ text/html  depth=2  frameId=F8DF95F3A557B6DF61D3AB64E21343E8
              url: https://mooc1.chaoxing.com/ananas/modules/pdf/index.html?v=2026-0826-1905
@@ -78,7 +78,7 @@ frame 树实测 + chain() 分支修正说明
     .video-js类: <DIV class="video-js vjs-default-skin vjs-big-play-centered vjs-paused v" 844x474 @0,0>
     .video-js类: <VIDEO class="vjs-tech" 844x474 @0,0>
 
-  frame #8  https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&knowledgeid=1227808599&num=0&ut…
+  frame #8  https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=<班级号>&courseId=<课程号>&knowledgeid=1227808599&num=0&ut…
     frameId: F6477F3958440080BA8102BAEE490899
     <AUDIO> class="" 0x0  inVideoJs=false
        src       : (空)
@@ -109,7 +109,7 @@ frame 树实测 + chain() 分支修正说明
               src=(空)
               → 对应 CDP 子 frame #13  https://pan-yz.chaoxing.com/screen/v2/file_881c7322e1c2a9ec17e23e53f6cf4bd1?ext=%7B%22_from_%22%3A%2…
               → 那一层：media=0  .video-js类=0  iframe=0
-  frame #8 (: https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&k…) 有 2 个 iframe 元素，CDP 记到这个 frame 的子 frame 有 2 个
+  frame #8 (: https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=<班级号>&courseId=<课程号>&k…) 有 2 个 iframe 元素，CDP 记到这个 frame 的子 frame 有 2 个
      iframe[0] id="" class="ans-attach-online insertdoc-online-pdf" 845x707 @100,215
               src=/ananas/modules/pdf/index.html?v=2026-0826-1905
               → 对应 CDP 子 frame #9  https://mooc1.chaoxing.com/ananas/modules/pdf/index.html?v=2026-0826-1905
@@ -118,9 +118,9 @@ frame 树实测 + chain() 分支修正说明
               src=/ananas/modules/video/index.html?v=2026-0901-1154
               → 对应 CDP 子 frame #14  https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2026-0901-1154
               → 那一层：media=1  .video-js类=8  iframe=1   ★ 有 <VIDEO>（在 .video-js 里）
-  frame #1 (: https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&c…) 有 7 个 iframe 元素，CDP 记到这个 frame 的子 frame 有 7 个
+  frame #1 (: https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=<章节号>&courseId=<课程号>&c…) 有 7 个 iframe 元素，CDP 记到这个 frame 的子 frame 有 7 个
      iframe[0] id="iframe" class="" 1038x1756 @0,-817
-              src=/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&knowledgeid=1227808599&num=
+              src=/mooc-ans/knowledge/cards?clazzid=<班级号>&courseId=<课程号>&knowledgeid=1227808599&num=
               → 对应 CDP 子 frame #2  about:blank
               → 那一层：media=0  .video-js类=0  iframe=0
      iframe[1] id="ueditor_0" class="" 0x0 @0,0
@@ -145,17 +145,17 @@ frame 树实测 + chain() 分支修正说明
               → 那一层：media=0  .video-js类=0  iframe=0
      iframe[6] id="" class="edui-default" 0x0 @0,0
               src=about:blank
-              → 对应 CDP 子 frame #8  https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&knowledgeid…
+              → 对应 CDP 子 frame #8  https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=<班级号>&courseId=<课程号>&knowledgeid…
               → 那一层：media=1  .video-js类=0  iframe=2   ★ 有 <AUDIO>
 
 --- 结论：哪一条分支挂着播放器 ---
   #1  →  #8  →  #14   （第 2 层）
-    顶层 frame#1  media=0 .video-js=0 iframe=7  url=https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&c…
-    第1层 frame#8  media=1 .video-js=0 iframe=2  url=https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&k…
+    顶层 frame#1  media=0 .video-js=0 iframe=7  url=https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=<章节号>&courseId=<课程号>&c…
+    第1层 frame#8  media=1 .video-js=0 iframe=2  url=https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=<班级号>&courseId=<课程号>&k…
     第2层 frame#14  media=1 .video-js=8 iframe=1  url=https://mooc1.chaoxing.com/ananas/modules/video/index.html?v=2026-0901-1154
   #1  →  #8   （第 1 层）
-    顶层 frame#1  media=0 .video-js=0 iframe=7  url=https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=1227808599&courseId=266357289&c…
-    第1层 frame#8  media=1 .video-js=0 iframe=2  url=https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=153929011&courseid=266357289&k…
+    顶层 frame#1  media=0 .video-js=0 iframe=7  url=https://mooc1.chaoxing.com/mycourse/studentstudy?chapterId=<章节号>&courseId=<课程号>&c…
+    第1层 frame#8  media=1 .video-js=0 iframe=2  url=https://mooc1.chaoxing.com/mooc-ans/knowledge/cards?clazzid=<班级号>&courseId=<课程号>&k…
 ══════════════════════════════════════════════════════════════════
 
 

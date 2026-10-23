@@ -4,7 +4,7 @@
  * 只喂事实、看结论。全部用虚构数据。
  *
  * 跑法：
- *   C:\Users\TestUser\DeepSeekHarness\node\node.exe --test tests\quiz-state.test.js
+ *   C:\\Users\\<用户名>\\DeepSeekHarness\node\node.exe --test tests\quiz-state.test.js
  */
 'use strict';
 

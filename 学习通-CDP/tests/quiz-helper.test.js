@@ -24,7 +24,7 @@
  *   再用"把真路径临时替换成假路径"的方式验"谁写了哪个文件"，而不是去看真文件。
  *
  * 【跑法】
- *   C:\Users\TestUser\DeepSeekHarness\node\node.exe --test --test-isolation=none tests\quiz-helper.test.js
+ *   C:\\Users\\<用户名>\\DeepSeekHarness\node\node.exe --test --test-isolation=none tests\quiz-helper.test.js
  *   （dsh 沙箱里必须带 --test-isolation=none：默认的子进程 spawn 会 EPERM）
  *
  * 【注意：这个文件里的 handle() 走的是生产轮询节奏】

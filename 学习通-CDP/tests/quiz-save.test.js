@@ -10,7 +10,7 @@
  *   3. 只找到提交按钮 → 明确"已拒绝"，并且日志里要能跟"根本没有保存按钮"分开。
  *
  * 跑法：
- *   C:\Users\TestUser\DeepSeekHarness\node\node.exe --test --test-isolation=none tests\quiz-save.test.js
+ *   C:\\Users\\<用户名>\\DeepSeekHarness\node\node.exe --test --test-isolation=none tests\quiz-save.test.js
  */
 'use strict';
 

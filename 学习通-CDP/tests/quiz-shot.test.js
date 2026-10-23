@@ -13,7 +13,7 @@
  *   5. 超时最多重试 1 次（和连接故障重试 2 次分开），日志/账目里有痕迹。
  *
  * 跑法：
- *   C:\Users\TestUser\DeepSeekHarness\node\node.exe --test --test-isolation=none tests\quiz-shot.test.js
+ *   C:\\Users\\<用户名>\\DeepSeekHarness\node\node.exe --test --test-isolation=none tests\quiz-shot.test.js
  */
 'use strict';
 

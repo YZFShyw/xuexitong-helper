@@ -6,7 +6,7 @@
  *   用的配置内容也全是虚构的（key 一律写成 假key-不准是真key）。
  *
  * 跑法：
- *   C:\Users\TestUser\DeepSeekHarness\node\node.exe --test --test-isolation=none tests\quiz-config.test.js
+ *   C:\\Users\\<用户名>\\DeepSeekHarness\node\node.exe --test --test-isolation=none tests\quiz-config.test.js
  */
 'use strict';
 
