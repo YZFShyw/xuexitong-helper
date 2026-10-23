@@ -309,3 +309,29 @@ test('⑩ 续播限流：60 秒超 5 次进 120 秒冷静期；冷静期不抢�
   assert.ok(SRC.includes('let autoStandsSeen = -1;'), 'driver 侧要有去重游标');
   assert.ok(SRC.includes('⚡ 续播冷静期：抢播太密'), '进冷静期必须有一条诚实日志（防"悄悄变了节奏"）');
 });
+
+/* 【法师要求：确保"强制推进"还有效 · 2026-10-23】
+   背景：今天给主循环的 finally 加了 `markProgress('答题结束')`（修"答题耗时被算成零推进"）。
+   要防两件事：① 顺手把 90 秒强推的出口弄没了；② 那个 markProgress 每轮都调，
+   把看门狗彻底喂饱、再也不触发。
+   判据（源码契约，不 require driver.js）：
+     · 90 秒判定 + "强制往下走一次" + advance('长时间零推进。') 三样都在；
+     · 强推出口前面**不许**出现 gateCheck（设计上就是故意不带闸门）；
+     · `quizSeen = key` 必须在调用 handle 之前置位 —— 保证每章最多补一次计时器。 */
+test('⑪ 零推进强制推进仍然有效，且"答题结束"的补计时器不会把看门狗喂死', () => {
+  const idleAt = SRC.indexOf('const idleMs = Date.now() - lastProgressAt;');
+  assert.ok(idleAt > 0, '90 秒零推进的判定必须还在');
+  const seg = SRC.slice(idleAt, idleAt + 1400);
+  assert.match(seg, /if \(idleMs > 90000\) \{/, '阈值必须还是 90 秒，而且要真的进这个分支');
+  assert.match(seg, /强制往下走一次/, '到点要真的喊出来');
+  assert.match(seg, /advance\('长时间零推进。'\)/, '到点必须真的翻页（这是最后一道保险）');
+  assert.ok(!/gateCheck\s*\(/.test(seg), '强推出口不许加收口闸门（加了就会永远卡住）');
+
+  /* 补计时器只允许在 handle 结束那一刻调一次：quizSeen 守卫必须在 handle 之前置位 */
+  const guardAt = SRC.indexOf('if (quizSeen !== key');
+  const setSeenAt = SRC.indexOf('quizSeen = key;');
+  const handleAt = SRC.indexOf('lines = await quizHelper.handle(s.chapter || lastChapter, q, log);');
+  assert.ok(guardAt > 0 && setSeenAt > guardAt && handleAt > setSeenAt,
+    'quizSeen 要先判、再置位、再调 handle —— 否则同一章每轮都会重进、每次都重置计时器');
+  assert.match(SRC, /try \{ markProgress\('答题结束：'/, '答题结束要补一次计时器');
+});
