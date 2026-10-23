@@ -379,13 +379,17 @@ function makeFingerprinter(opts) {
     /* 【尾部也要进键 · 2026-10-22 codex 复核】原来只取前 40 字，于是"共同题干很长、
        只有末尾「正确/错误」不同"的两道判断题 → 前 40 字相同 + 选项集合相同（都是对/错）
        → 算出同一个前缀键 → 可能拿到另一道题的答案。现在把末尾 12 字也纳入键
-       （题干短到已全含在前 40 字里时不再重复加）。版本号 prefix1 → prefix2，旧索引自然作废。 */
+       （题干短到已全含在前 40 字里时不再重复加）。
+       【中间也采样 · 2026-10-23 复核第二轮】只加尾部还不够：题干中间的条件/数字变了
+       （「当 x>0 时…」vs「当 x<0 时…」）头尾都可能一样。再取正中 12 字。
+       版本号 prefix2 → prefix3，旧索引自然作废。 */
+    const mid = full.length > 52 ? full.slice(Math.floor(full.length / 2) - 6, Math.floor(full.length / 2) + 6) : '';
     const tail = full.length > 40 ? full.slice(-12) : '';
     const opts2 = Array.isArray(qq.options) ? qq.options : [];
     const opts = opts2.map((op) => normalizeForFp(decode(String((op && op.text) == null ? '' : op.text)))).sort();
     const type = normalizeForFp(String(qq.type == null ? '' : qq.type));
     if (!stem) return '';
-    return hash('prefix2\n' + type + '\n' + stem + '\n' + tail + '\n' + opts.join('\n')).slice(0, hexLen);
+    return hash('prefix3\n' + type + '\n' + stem + '\n' + mid + '\n' + tail + '\n' + opts.join('\n')).slice(0, hexLen);
   };
 
   return { fpOf, digestOf, normalizeForFp, looseOf, looseText, prefixOf };

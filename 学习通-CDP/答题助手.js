@@ -1772,18 +1772,10 @@ function fillAct(hint, spec) {
 
    每条仍会检查"点完页面变了没有"，没变就如实报失败。 */
 
-/* 【题号重编 · 2026-10-21】AI 是按"原题号"回答的（作业里是 10. / 11.），而 fillFromText 的
-   indexMap 是按"第 1..vN 条"对位的 —— 不重编就会被当成"越界"全部跳过（实测第 10、11 两道都丢）。
-   抄录顺序 = 截图顺序 = onlyIdx 顺序，所以按出现顺序重编成 1..N 就是正确的对应关系。 */
-function renumberAnswers(txt) {
-  let k = 0;
-  return String(txt == null ? '' : txt).split(/\r?\n/).map((line) => {
-    const m = line.match(/^(\s*)(\d{1,2})(\s*[.、)）])/);
-    if (!m) return line;
-    k++;
-    return m[1] + k + m[3] + line.slice(m[0].length);
-  }).join('\n');
-}
+/* 【2026-10-23 删掉 renumberAnswers】它按"出现顺序"把题号压成 1..N：
+   AI 回「1.A、3.B」（跳过第 2 题）时会被压成「1.A、2.B」→ 第三题的答案填到第二题
+   （codex 在 fb2cac2 上复现的 P1 回归）。现在改成 fillFromText 里用 origMap
+   「原题号(1起) → 页面索引(0起)」显式映射，对不上就跳过，绝不重编号。 */
 
 async function fillFromText(ev, text, domCount, deps) {
   const picks = [];
@@ -1863,12 +1855,25 @@ async function fillFromText(ev, text, domCount, deps) {
      缺省不映射 —— 老行为一个字节不变。
      模型多给的答案（映射不到的）**不填**，并如实记进"跳过"。 */
   const idxMap = (deps && Array.isArray(deps.indexMap) && deps.indexMap.length) ? deps.indexMap : null;
-  if (idxMap) {
+  /* 【原题号映射 · 2026-10-23 codex P1：不许再按出现顺序重编】AI 有三种答法：
+       ① 按页面原题号（10. / 11.）—— 截图只拍一部分时最常见；
+       ② 按这批的第几条（1. / 2.）；
+       ③ 跳号（1.A、3.B）。
+     原来用 renumberAnswers 一律按出现顺序压成 1..N，第③种会变成 1.A、2.B ——
+     第三题的答案被填到第二题（codex 在 fb2cac2 上复现的回归）。
+     现在：origMap 存「原题号(1起) → 页面索引(0起)」，命中就按它填；不命中再回退
+     「第 k 条 ↔ indexMap[k]」；两边都对不上就**跳过**（宁漏不错位）。 */
+  const origMap = (deps && deps.origMap && typeof deps.origMap === 'object') ? deps.origMap : null;
+  if (idxMap || origMap) {
     for (let i = picks.length - 1; i >= 0; i--) {
       const p = picks[i];
-      const real = idxMap[p.idx];
+      let real = null;
+      if (origMap && origMap[p.n] != null) real = origMap[p.n];
+      else if (idxMap && idxMap[p.idx] != null) real = idxMap[p.idx];
       if (real == null) {
-        skippedMsg.push('第' + (p.idx + 1) + '条答案=「' + p.raw + '」（这次只截了 ' + idxMap.length + ' 道题，多出来的答案没填）');
+        const pool = idxMap ? idxMap.length : (origMap ? Object.keys(origMap).length : 0);
+        skippedMsg.push('第' + p.n + '条答案=「' + p.raw + '」（这次只截了 ' + pool +
+          ' 道题，多出来的答案没填；题号对不上，宁可不填也不错位）');
         picks.splice(i, 1);
         continue;
       }
@@ -3738,9 +3743,10 @@ function makeHelper(cfg, deps) {
                          （比如只剩第 7 题就答「7. B」）→ idxMap[6] 越界 → 全被跳过，
                          看起来像"抄录失败"。renumberAnswers 把 7. 重编成 1. 再填。
                          全拍（无 indexMap）时答案本来就是 1..N，重编等于不改。 */
-                      fillMsg = await fillFromText(evFn, renumberAnswers(a.text), shotN, {
+                      fillMsg = await fillFromText(evFn, a.text, shotN, {
                         /* 【部分命中：把"第 k 条答案"换算成页面题号】不传（全拍）时行为不变 */
                         indexMap: shotOnly || undefined,
+                        origMap: shotOnly ? Object.fromEntries(shotOnly.map((qi) => [qi + 1, qi])) : undefined,
                         reopenQuiz, clickAt,
                         /* 结构化结果直接给数字，省得再从字符串里正则数 */
                         onResult: (rep) => { fillReport = rep; }
@@ -3840,14 +3846,23 @@ function makeHelper(cfg, deps) {
            ③ 选项内容完全没进指纹。
            现在用短哈希，而且**被跳过时必须在日志里说明原因和题号**（下面那条 noteMiss）。 */
         const fpKey = fp.fpOf(q);
-        if (done.has(fpKey)) {
-          const why = doneWhy.get(fpKey) || '与前面某道题指纹相同';
+        /* 【图片身份也要进去重/缓存键 · 2026-10-23 codex P1】文字和选项完全一样、只有配图不同的
+           两道题，是两道**不同的题**（实测作业第 10、11 题就是这样）。原来只用文字指纹做
+           done 去重和缓存键 → 第二道被当成重复题跳过、或直接复用第一道那张图的答案。
+           这里：题库查找继续用 fpKey（库里的键是文字+选项），
+           去重与缓存改用 dedupeKey = fpKey + 图片文件名列表。无图题 dedupeKey === fpKey，老缓存照旧命中。 */
+        const imgSig = (Array.isArray(q.imgs) && q.imgs.length)
+          ? q.imgs.map((u) => String(u || '').split('/').pop()).filter(Boolean).join(',')
+          : '';
+        const dedupeKey = imgSig ? (fpKey + '|img:' + imgSig) : fpKey;
+        if (done.has(dedupeKey)) {
+          const why = doneWhy.get(dedupeKey) || '与前面某道题指纹相同';
           lines.push('  [跳过] ' + fp.digestOf(q) + ' —— ' + why + '（指纹 ' + fpKey.slice(0, 8) + '）');
           noteMiss(q, '与前面那道题指纹相同（' + why + '，指纹 ' + fpKey.slice(0, 8) + '），已跳过');
           continue;
         }
-        done.add(fpKey);
-        doneWhy.set(fpKey, '同一章里已经处理过这道题');
+        done.add(dedupeKey);
+        doneWhy.set(dedupeKey, '同一章里已经处理过这道题');
         n++;
         if (cfg.stats) cfg.stats.found = (cfg.stats.found || 0) + 1;
 
@@ -3901,7 +3916,7 @@ function makeHelper(cfg, deps) {
              cfg.useAnswerCache === false 时整条缓存都不碰（想每次都问新的就关掉它）。 */
           let p = null;
           /* 缓存也是"模型给的答案"，AI 关着就不该拿它糊上（要重新答一遍的语义） */
-          const cached = (cfg.useAnswerCache === false || !useAI) ? null : cacheGet(fpKey, q.type);
+          const cached = (cfg.useAnswerCache === false || !useAI) ? null : cacheGet(dedupeKey, q.type);
           if (cached) {
             p = { answer: cached.answer, reason: (cached.reason || '') + '（来自答案缓存，没重新问模型）' };
             lines.push('      → 答案（缓存）：' + p.answer);
@@ -3950,7 +3965,7 @@ function makeHelper(cfg, deps) {
                 lines.push('      → ⚠ 模型返回的是空正文（不是"答不上来"）');
                 for (const L of String(a.note).split('\n')) lines.push('        ' + L);
               }
-              if (p.answer !== null) cachePut(fpKey, q.type, p.answer, p.reason);
+              if (p.answer !== null) cachePut(dedupeKey, q.type, p.answer, p.reason);
             }
 
             /* 填进页面（只填，不交）。用 q.stem（页面上的原文）去定位，
@@ -4042,8 +4057,10 @@ function makeHelper(cfg, deps) {
               for (const L of String(va.text).split(/\r?\n/)) lines.push('     ' + L);
               lines.push('     ──────────────────────────────────');
               try {
-                vMsg = await fillFromText(evFn, renumberAnswers(va.text), vN, {
-                  indexMap: onlyIdx, reopenQuiz: reopenQuiz, clickAt: clickAt
+                vMsg = await fillFromText(evFn, va.text, vN, {
+                  indexMap: onlyIdx,
+                  origMap: Object.fromEntries(onlyIdx.map((qi) => [qi + 1, qi])),
+                  reopenQuiz: reopenQuiz, clickAt: clickAt
                 });
               } catch (e) { vMsg = '填充出错：' + ((e && e.message) || e); }
               lines.push('     → ' + vMsg);
@@ -4090,8 +4107,10 @@ function makeHelper(cfg, deps) {
               lines.push('       ──── 整页兜底答案（模型生成，没有验证过）────');
               for (const L of String((va2 && va2.text) || '').split(/\r?\n/)) lines.push('       ' + L);
               lines.push('       ──────────────────────────────────');
-              const vMsg2 = await fillFromText(evFn, renumberAnswers((va2 && va2.text) || ''), vMissedIdx.length, {
-                indexMap: vMissedIdx, reopenQuiz: reopenQuiz, clickAt: clickAt
+              const vMsg2 = await fillFromText(evFn, (va2 && va2.text) || '', vMissedIdx.length, {
+                indexMap: vMissedIdx,
+                origMap: Object.fromEntries(vMissedIdx.map((qi) => [qi + 1, qi])),
+                reopenQuiz: reopenQuiz, clickAt: clickAt
               });
               lines.push('       → ' + vMsg2);
               const m2 = String(vMsg2).match(/已按顺序填进页面：([\s\S]*)$/);

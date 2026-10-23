@@ -37,9 +37,23 @@ function loadList() {
   }
   return out;
 }
-function saveList(list) {
+function saveList(list, opts) {
+  /* 【可选合并写 · 2026-10-23 codex P2】`--ai` 是"读清单 → 挨个问模型（几十秒）→ 整体写回"，
+     这段窗口里驱动器可能又 addMiss 了新题；直接覆盖会把它们**静默丢掉**。
+     opts.merge=true 时先读磁盘最新，把"我改过状态的那些"按 fp 合进去，磁盘多出来的新记录保留。 */
+  let out = list;
+  if (opts && opts.merge) {
+    const disk = loadList();
+    const mine = new Map((list || []).map((x) => [x.fp, x]));
+    for (const d of disk) {
+      const m = mine.get(d.fp);
+      if (!m) mine.set(d.fp, d);
+      else Object.assign(d, m);
+    }
+    out = Array.from(mine.values());
+  }
   const tmp = FILE + '.tmp';
-  fs.writeFileSync(tmp, list.map((x) => JSON.stringify(x)).join('\n') + '\n', 'utf8');
+  fs.writeFileSync(tmp, out.map((x) => JSON.stringify(x)).join('\n') + '\n', 'utf8');
   fs.renameSync(tmp, FILE);
 }
 
@@ -107,14 +121,17 @@ function applyAnswer(bank, fpKey, answer, opts) {
     cand.srcs = Array.from(new Set((cand.srcs || []).concat(['manual:pending'])));
   }
   QB.applyTopAnswer(e);
-  item.status = 'filled';
-  item.filledAt = new Date().toISOString();
-  item.filledAnswer = ans;
-  saveList(list);
+  /* 【顺序不能反 · 2026-10-23 codex P2】原来是"先标 filled + 存清单，再写题库"：
+     题库写失败（EISDIR / 磁盘满 / 权限）时清单已经标完成 → 这道题从待补里消失、库里又没答案，
+     等于彻底丢了。现在先写库，成功了才标 filled。 */
   if (o.save !== false) {
     QB.backupBank(BANK_FILE);
     fs.writeFileSync(BANK_FILE, QB.serializeBank(bank), 'utf8');
   }
+  item.status = 'filled';
+  item.filledAt = new Date().toISOString();
+  item.filledAnswer = ans;
+  saveList(list);
   return { ok: true, fp: fpKey, answer: ans };
 }
 
@@ -213,7 +230,10 @@ if (require.main === module) {
           } else fail++;
         } catch (e) { fail++; console.log('  ' + x.fp.slice(0, 8) + ' 失败：' + String(e.message || e).slice(0, 50)); }
       }
-      saveList(list);
+      /* 【合并写 · 2026-10-23 codex P2】这一步之前是 `saveList(list)` 整体覆盖：
+         问模型要几十秒，这期间驱动器可能又 addMiss 了新的漏题 —— 会被静默丢掉。
+         merge 模式先读磁盘最新，只把"我改过的 aiGuess 等状态"合回去。 */
+      saveList(list, { merge: true });
       console.log('完成：建议 ' + ok + ' 条，失败 ' + fail + ' 条（用 --list 查看，--set 确认入库）');
     })();
     return;
