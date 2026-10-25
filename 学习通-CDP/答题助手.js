@@ -1597,21 +1597,28 @@ function fillAct(hint, spec) {
        **不是** li 自己的 class —— 之前我就是只看 li 的 class，
        所以既没认出来已经选中的，也没发现重复点击会取消。
 
-       【2026-10-10 补：要连着往上找几层】
+       【2026-10-10 补：作业页的标记打在父元素上；2026-10-25 收窄成只管 1 层】
        作业作答页的 DOM 长这样，选中的标记打在**父元素**上：
            <div class="clearfix answerBg workTextWrap" aria-checked="true">   ← 标记在这层
              <div class="fl answer_p" aria-hidden="true"><p>…</p></div>      ← 我们拿到的却是这层
        只查 el 自己就永远读到 null，于是每一道都误报「点了但没选中」，
        而页面上其实早就选好了（截图能看见蓝圈）。
-       往上找 4 层足够覆盖这两种结构。 */
+
+       但"往上找 4 层"在多选题上是错的：LI > UL.Zy_ulTop > DIV.clearfix > DIV.TiMu，
+       第 4 层正好是 .TiMu，在那上面 querySelector(".check_answer_dx") 会捞到**兄弟选项**的标记
+       —— 只要本题有一个选项选中，四个选项全部判成"已选中"（真页面实测：C 选中时 A/D 也命中）。
+       后果是账面上"已选中：ABC"而实际只点上一个，复查和记账跟着全错。
+       现在：自身 aria → 自身内部的 .check_answer* → 直接父级的 aria（只 1 层，且不做后代查询）。
+       多选题的标记本来就在 li 自己身上（aria-checked=true）和 li 里的 span.num_option_dx 上。 */
     '  function isOn(el) {',
     '    try {',
-    '      var n = el;',
-    '      for (var up = 0; up < 4 && n; up++) {',
-    '        if (String(n.getAttribute("aria-checked")) === "true") return true;',
-    '        if (String(n.getAttribute("aria-pressed")) === "true") return true;',
-    '        if (n.querySelector && n.querySelector(".check_answer, .check_answer_dx")) return true;',
-    '        n = n.parentElement;',
+    '      if (String(el.getAttribute("aria-checked")) === "true") return true;',
+    '      if (String(el.getAttribute("aria-pressed")) === "true") return true;',
+    '      if (el.querySelector && el.querySelector(".check_answer, .check_answer_dx")) return true;',
+    '      var p1 = el.parentElement;',
+    '      if (p1) {',
+    '        if (String(p1.getAttribute("aria-checked")) === "true") return true;',
+    '        if (String(p1.getAttribute("aria-pressed")) === "true") return true;',
     '      }',
     '    } catch (e) {}',
     '    return false;',
@@ -1621,11 +1628,16 @@ function fillAct(hint, spec) {
        isTrusted=false，学习通的 addChoice() 不认，10 道题全部报"点了没选中"、一道都填不上。
        驱动那边翻页和起播早就在用 CDP Input.dispatchMouseEvent（真鼠标事件、isTrusted=true，
        见 driver.js 的 clickTop），只有选项点击漏了这一处。
-       现在这个函数只负责把坐标算出来（先滚进可视区，再逐层累加 iframe 偏移得到顶层视口坐标），
-       真正点下去由驱动侧用 CDP 发；点完由调用方回来复查 selected，不假设成功。 */
+       现在这个函数只负责把坐标算出来（逐层累加 iframe 偏移得到顶层视口坐标），
+       真正点下去由驱动侧用 CDP 发；点完由调用方回来复查 selected，不假设成功。
+
+       【2026-10-25 把"滚进可视区"从这里挪走】
+       原来每算一个选项都调 el.scrollIntoView({block:"center"})，等于把每个选项**轮流**滚到
+       视口正中再取中心点 —— 一道题 4 个选项算出来全是同一个坐标（真页面实测都是 519,480）。
+       多选题点 N 次就变成同一个点 toggle N 次：偶数个答案一个都没点上，奇数个只点上一个，
+       而 isOn 又把它报成"全选中"（见上面那条）。现在滚动只在 scrollBox() 里对**题目容器**做一次。 */
     '  function topCoord(el) {',
     '    if (!el) return null;',
-    '    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (e) {}',
     '    var r = el.getBoundingClientRect();',
     '    var x = r.left + r.width / 2, y = r.top + r.height / 2;',
     '    var win = null;',
@@ -1640,6 +1652,15 @@ function fillAct(hint, spec) {
     '    }',
     '    return { x: Math.round(x), y: Math.round(y),',
     '             inView: (x >= 0 && y >= 0 && x <= window.innerWidth && y <= window.innerHeight) };',
+    '  }',
+    /* 【滚动只做一次 · 2026-10-25】
+       见 topCoord 上面那条：对每个选项各滚一次，坐标会全部塌成视口中心。
+       这里改成只把**题目容器**滚到视口中间，之后所有选项按同一个滚动位置算坐标，
+       彼此之间才保留真实的 y 差（实测选项间距 51px），点哪个是哪个。
+       题目容器一般 300~500 高，居中后 4 个选项都在视口里；
+       个别超长题底部会露出视口 —— 那种按 inView=false 处理，如实报没点上，不猜。 */
+    '  function scrollBox() {',
+    '    try { el.scrollIntoView({ block: "center", inline: "nearest" }); } catch (e) {}',
     '  }',
     '  var SELS = [".TiMu", ".questionLi", ".question-item", ".test-item", ".queBox", ".exam-question"];',
     /* 【候选选项的选择器要够宽 —— 只认 li.before-after 会在换版/换题型时整章丢题】
@@ -1760,6 +1781,7 @@ function fillAct(hint, spec) {
     '    if (!anyOk) return { ok: false, why: "输入框没写进去（页面不认）", picks: reps, n: roots.length };',
     '    return { ok: true, picks: reps, how: how + "（填空，写了 " + reps.length + " 个空）", n: roots.length, typed: true };',
     '  }',
+    '  scrollBox();',
     '  var cands = el.querySelectorAll(OPT), picks = [];',
     '  for (var i2 = 0; i2 < cands.length; i2++) {',
     '    var sp = cands[i2].querySelector(NUM);',
@@ -1797,9 +1819,19 @@ function fillAct(hint, spec) {
     '    if (hit) picks.push({ el: cands[i2], letter: lt || ("#" + (i2 + 1)), byPos: false });',
     '  }',
     '  if (!picks.length && BY === "letter" && cands.length) {',
+    /* 【按位置兜底只认同一层的选项 · 2026-10-25】
+       cands 里混着 li 和它的内层元素（.answer_p / .option-item），拿"第几个候选"当字母用
+       会整体错位：A 点到 li 上、B 点到同一个 li 的 .answer_p 上。
+       有 li 就只用 li（平台的单选/多选题都是 li）；
+       作业页那种全是 div.answer_p 的结构没有 li —— 那时退回"全部候选按顺序"（本来就只有一层）。 */
+    '    var posList = [];',
+    '    for (var pz = 0; pz < cands.length; pz++) {',
+    '      if (String(cands[pz].tagName || "").toUpperCase() === "LI") posList.push(cands[pz]);',
+    '    }',
+    '    if (!posList.length) posList = cands;',
     '    for (var lj = 0; lj < V.length; lj++) {',
     '      var ix = V[lj].charCodeAt(0) - 65;',
-    '      if (ix >= 0 && ix < cands.length) picks.push({ el: cands[ix], letter: V[lj], byPos: true });',
+    '      if (ix >= 0 && ix < posList.length) picks.push({ el: posList[ix], letter: V[lj], byPos: true });',
     '    }',
     '  }',
     '  if (!picks.length) return { ok: false, why: "这道题里没找到匹配的选项元素", n: roots.length };',
