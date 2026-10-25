@@ -83,3 +83,32 @@ test('一题没做成 → missed 只加 1、onUnanswered 只回调 1 次（修�
     assert.match(cbStem, /账目用例/, '回调里带的是这道题的题干');
   });
 });
+
+/* 【0 题不该保存 · 2026-10-25 实证后修】
+   现场：1.2 教学视频 探针报「共 0 题」，DOM 路末尾无条件的 save() 在空页面上
+   探不到「暂时保存」按钮 → SAVED.FAILED → driver 的 gateCheck 写停止标记 → 整条链停住。
+   这条用例把「0 题 → 不保存、不需要人工确认」钉死。 */
+test('0 题 → handle 直接收工，不调保存、不要求人工确认', async () => {
+  await withTmp(async () => {
+    const stats = { chapters: 0, found: 0, filled: 0, missed: 0, saveConfirmed: 0, saveUnconfirmed: 0, saveFailed: 0 };
+    let netCalls = 0;
+    const cfg = {
+      mode: 2, apiKey: '假key-不是真的', model: 'fm', visionModel: 'fvm',
+      readMode: 'auto', maxShots: 1, autoFill: true, useAnswerCache: false, maxPerChapter: 30,
+      stats: stats, onUnanswered: () => { stats.missed++; },
+    };
+    globalThis.fetch = async () => { netCalls++; throw new Error('0 题不该发请求'); };
+    const ev = async () => ({ ok: true, n: 0, vis: 0, probe: true, docs: 1 });
+    const helper = quiz.makeHelper(cfg, { ev: ev, shot: async () => '', clickAt: null, reopenQuiz: null });
+    const probe = { found: 0, obfCount: 0, fontB64: '', graded: false, docCount: 1, questions: [] };
+
+    const lines = await helper.handle('空章', probe, () => {});
+
+    assert.equal(helper.lastSaveResult(), null, '0 题不该产生保存结果');
+    assert.equal(helper.pendingSave().needConfirm, false, '0 题不该要求人工确认（那会写停止标记）');
+    assert.equal(helper.pendingSave().blocksContinue, false, '0 题不该拦住往下走');
+    assert.equal(netCalls, 0, '0 题不该发任何请求');
+    assert.equal(stats.missed, 0, '0 题不是"欠账"');
+    assert.match(lines.join('\n'), /共 0 题/, '结论里要说清楚是 0 题');
+  });
+});

@@ -4352,7 +4352,12 @@ const DOC_STEP = `(function(){
        实测（2026/9/26 16:07）就是这么刷的。所以把判断提到 probe 之前。 */
     if (quizHelper.mode > 0 && !quizFilledKeys.has(s.chapter || lastChapter)) {
       const q = await quizHelper.probe(ev);
-      if (q) {
+      /* 【0 题不进 handle · 2026-10-25】实证：1.2 教学视频 探到 0 题照样进 handle，
+         handle 末尾无条件的 save() 在空页面上探不到「暂时保存」→ 判 SAVED.FAILED
+         → gateCheck 写停止标记 → 整条链停住。答题助手那边已经加了 0 题早退，
+         这里再挡一道：0 题不当成"这一章做了"，也就不该 quizFilledKeys.add。
+         注意 quizSeen 照样不置位 —— 万一题是晚一点才渲染出来，下一轮还能再探到。 */
+      if (q && q.found > 0) {
         const key = (s.chapter || '') + '|' + q.found;
         if (quizSeen !== key && !quizFilledKeys.has(s.chapter || lastChapter)) {
           quizSeen = key;

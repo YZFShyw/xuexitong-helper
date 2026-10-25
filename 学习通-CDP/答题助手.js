@@ -2885,6 +2885,17 @@ function makeHelper(cfg, deps) {
     /* 真正处理一批题目，返回要打印的行 */
     async handle(chapter, r, log) {
       const lines = [];
+      /* 【0 题直接收工 · 2026-10-25 实证后修】
+         现场：1.2 教学视频 那章探针报「共 0 题」，但 DOM 路末尾的 save() 是**无条件**的
+         → saveDraftResult 在空页面上探不到「暂时保存」按钮 → 判 SAVED.FAILED
+         → driver 的 gateCheck 看到"保存没确认"就写停止标记、停在题页不动
+         （那句设计是防丢草稿，可这里根本没有草稿可丢）→ 整条链就这么停住了。
+         0 题 = 这一章没有题目可做：不填、不保存、不记欠账，直接返回。
+         放在 obfCount 之前，顺带把 r 为空的极端情况也挡住。 */
+      if (!(r && r.found > 0)) {
+        lines.push('──────── 测验：' + (chapter || '') + '   共 0 题 —— 这一章没有题目，跳过（不填、不保存）');
+        return lines;
+      }
       const stamp = new Date().toLocaleString('zh-CN');
       const obfN = r.obfCount || 0;
       const rm = cfg.readMode || 'auto';
