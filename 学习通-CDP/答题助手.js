@@ -717,6 +717,13 @@ function buildUser(q) {
     parts.push('选项：');
     for (const o of q.options) parts.push('  ' + (o.letter || '?') + '. ' + o.text);
   }
+  /* 【告诉模型"这次没有图" · 2026-10-28 法师要求】
+     实测（计算思维作业 30 题）：16 题带图，可只有 2 道主动说了「不确定」，
+     其余全是照着"下图是…"硬编，理由还写"由图可见" —— 它并不知道图没跟过来。
+     这条只在题干确实提到图时才该生效，所以措辞限定在"要你去看下图/如图"；
+     普通文字题题干里没有这种词，不会被误伤。 */
+  parts.push('（注意：本次只发送了文字，没有配图。如果题干要求看「下图 / 如图 / 图所示」，' +
+             '或者必须看图才能作答，请第一行只输出「不确定」，不要凭常识猜。）');
   return parts.join('\n');
 }
 
@@ -4146,7 +4153,18 @@ function makeHelper(cfg, deps) {
             }
           } catch (e) {
             lines.push('      → 问 AI 失败：' + e.message);
-            noteMiss(q, '问 AI 失败：' + e.message);
+            /* 【超时 + 带图 ⇒ 也让它进看图补漏 · 2026-10-28 实测】
+               作业页那 4 道（存储器阵列 / 指令格式，题干很长、带图）问 AI 直接
+               "This operation was aborted"（请求超时），落到的就是这个 catch。
+               原来这里只 noteMiss —— 截图兜底永远轮不到它们，题就白白空着。
+               图还在页面上、模型又没答出，那就该给它一次"看图再读一遍"的机会；
+               兜底真补不上时，下面那段会照旧记进欠账。 */
+            if (visionRetryReady() && hasImgs(q)) {
+              lines.push('        （这题带图，先登记，等会儿走截图再看一遍）');
+              visionMissed.push({ q: q, qi: r.questions.indexOf(q) });
+            } else {
+              noteMiss(q, '问 AI 失败：' + e.message);
+            }
           }
         } else {
           noteMiss(q, '答题助手模式是「' + (cfg.mode === 0 ? '不做题' : '记下题·不问AI') + '」，没答题');

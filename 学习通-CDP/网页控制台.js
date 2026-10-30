@@ -968,11 +968,36 @@ async function jobHomework(dry) {
     return;
   }
   const text = String((r.out || '') + (r.err || ''));
+  try { fs.mkdirSync(path.join(BASE, 'logs'), { recursive: true }); } catch (e) { /* 已存在或建不了 */ }
   try { fs.writeFileSync(path.join(BASE, 'logs', '填作业.txt'), text, 'utf8'); } catch (e) { /* 写不进去不影响结果 */ }
   /* 摘要取末尾几行 —— "遇到/填上/没做成"那三行就在最后 */
   const tail = text.trim().split('\n').slice(-4).map((s) => s.trim()).filter(Boolean)
                    .join(' ｜ ').slice(0, 220);
   setJob('填作业', r.code === 0 ? 'done' : 'fail', tail || ('退出码 ' + r.code));
+}
+
+/* 填考试：对着「考试」页跑一次 填考试.js（2026-10-27 加）。
+   和填作业一样：驱动器只认课程学习页，考试页它不导航过去；
+   而 填考试.js 自己会找 exam-ans 那个标签，所以这里只负责起进程、收结果。
+   【绝不提交】—— 脚本里没有任何点提交/交卷的动作，交卷永远由本人按。
+   考试页一页一题、每题问一次 AI，100 题大概几分钟，所以同样走异步 job。 */
+async function jobExam(dry) {
+  setJob('填考试', 'running', dry ? '正在连浏览器，找考试页…'
+                                  : '正在读题 —— 每题都要问一次 AI，可能要几分钟…');
+  let r;
+  try {
+    r = await runCapture(process.execPath, [P('填考试.js')].concat(dry ? ['--dry'] : []),
+                         { cwd: BASE, timeout: 40 * 60 * 1000, maxBuffer: 32 * 1024 * 1024 });
+  } catch (e) {
+    setJob('填考试', 'fail', '跑不起来：' + (e && e.message ? e.message : e));
+    return;
+  }
+  const text = String((r.out || '') + (r.err || ''));
+  try { fs.mkdirSync(path.join(BASE, 'logs'), { recursive: true }); } catch (e) { /* 已存在或建不了 */ }
+  try { fs.writeFileSync(path.join(BASE, 'logs', '填考试.txt'), text, 'utf8'); } catch (e) { /* 写不进去不影响结果 */ }
+  const tail = text.trim().split('\n').slice(-4).map((s) => s.trim()).filter(Boolean)
+                   .join(' ｜ ').slice(0, 220);
+  setJob('填考试', r.code === 0 ? 'done' : 'fail', tail || ('退出码 ' + r.code));
 }
 
 /* 【课程名映射】学习页上没有课程名（实测：DOM/iframe/全局变量都没有，只有 stu_CourseId），
@@ -1217,6 +1242,10 @@ async function handleAction(payload) {
          前端每几秒轮询一次状态，进度看「最近任务」那个小框。 */
       jobHomework(!!payload.dry).catch((e) => setJob('填作业', 'fail', String(e && e.message)));
       return { ok: true, queued: 'homework' };
+    case 'exam':
+      /* 填考试同样要跑几分钟（一页一题、每题问一次 AI），走异步 job */
+      jobExam(!!payload.dry).catch((e) => setJob('填考试', 'fail', String(e && e.message)));
+      return { ok: true, queued: 'exam' };
     case 'stopEdge': {
       /* 【只关助手自己那个实例】
          原来这里是 taskkill /f /im msedge.exe —— 用户所有 Edge 窗口一起没。
@@ -1670,6 +1699,19 @@ footer{max-width:1200px;margin:0 auto;padding:0 22px 40px;color:var(--dim2);font
       <span class="dim small">要先在浏览器里把那份作业打开着（它在找地址带 <code>work/dowork</code> 的那个标签）。</span>
     </div>
     <div id="hworkout" class="pre" style="display:none;margin-top:10px;max-height:320px"></div>
+
+    <div class="note" style="margin-top:14px;border-left-color:#ff6b6b">
+      <b>考试页</b>（一页一题、靠「下一题」翻页）：读当前题 → 问 AI → 点选项 → 翻下一题。
+      <b>交卷永远由你自己按</b>，脚本里没有任何提交动作。
+      ⚠ 最后一题的答案只存在页面内存里（没有「下一题」可以触发保存），
+      <b>填完别刷新、别翻走，直接检查后交卷</b>；前面各题是点「下一题」时平台自己存的。
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button onclick="examRun(true)">先看看当前这道题</button>
+      <button class="warn" onclick="examRun(false)">从这题开始往下填</button>
+      <span class="dim small">要先在浏览器里把考试页开着（它在找地址带 <code>exam-ans</code> 的那个标签）。</span>
+    </div>
+    <div id="examout" class="pre" style="display:none;margin-top:10px;max-height:320px"></div>
   </div></section>
 
   <section><h2>题库 <span class="tag" id="bankTag"></span></h2><div class="body">
@@ -2125,6 +2167,19 @@ function homework(dry){
   if (!dry && !confirm(tip + '。\\n\\n提交那一步永远由你自己按，程序不会碰。继续？')) return;
   hint('已下发：' + (dry ? '探测' : '填题') + '　进度看下面「最近任务」，全文在 logs\\填作业.txt');
   api('/api/action', {action:'homework', dry: !!dry}).then(function(r){
+    if (r.error) { hint(r.error); return; }
+    refresh();
+  });
+}
+/* 填考试：对着「考试」页跑一次 填考试.js（一页一题、每题问一次 AI）。
+   和填作业一样走 job（异步）—— 结果写在 logs\填考试.txt，页面上只显示末尾几行。
+   【绝不提交】交卷那一步永远由你自己按；最后一题的答案只在页面内存里，别刷新。 */
+function examRun(dry){
+  var tip = dry ? '先看看当前这道题（只探测 + 问一次 AI，不动页面）'
+                : '从当前这道题开始往下填：每题问一次 AI 再点选项';
+  if (!dry && !confirm(tip + '。\\n\\n交卷那一步永远由你自己按，程序不会碰。继续？')) return;
+  hint('已下发：' + (dry ? '探测' : '填题') + '　进度看下面「最近任务」，全文在 logs\\填考试.txt');
+  api('/api/action', {action:'exam', dry: !!dry}).then(function(r){
     if (r.error) { hint(r.error); return; }
     refresh();
   });

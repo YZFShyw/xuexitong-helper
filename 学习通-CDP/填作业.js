@@ -289,6 +289,15 @@ function connect(wsUrl) {
   };
 
   const cfg = quizMod.loadConfig();
+  /* 【--no-cache：这次别读答案缓存】(2026-10-28)
+     踩到的坑：改了提示词想重做一遍，结果 30 题里 26 题直接"答案（缓存）"——
+     同一道题的指纹没变，缓存一命中就根本不问模型，提示词改成什么都不生效。
+     加了缓存之后想真正重问一遍，就带这个参数。
+     【--fresh：缓存和题库都不读】只关缓存还不够 —— 第二次跑出来 26 题是
+     "答案（题库·作业作答·aria 确认过）"，命中的正是上一轮写进作业题库的旧答案，
+     提示词照样没机会生效。要真重做，两个都得关。 */
+  if (process.argv.includes('--no-cache') || process.argv.includes('--fresh')) cfg.useAnswerCache = false;
+  if (process.argv.includes('--fresh')) cfg.useBank = false;
   const MODE = ['不做题', '记下题·不问AI', '记下题·问AI'];
   console.log('答题助手: ' + (MODE[cfg.mode] || '不做题') + (cfg.mode >= 2 ? ('   模型 ' + cfg.model) : ''));
   if (cfg.mode <= 0) {
