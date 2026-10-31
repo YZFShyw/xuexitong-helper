@@ -154,7 +154,7 @@ async function askAI(cfg, q) {
     { role: 'user', content: lines.join('\n') },
   ];
   const call = async (extra) => {
-    const body = Object.assign({ model: cfg.model, max_tokens: 1200, temperature: 0, messages: msgs }, extra || {});
+    const body = Object.assign({ model: cfg.model, max_tokens: 8000, temperature: 0, messages: msgs }, extra || {});
     const r = await fetch(Q.apiUrlOf(cfg), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
@@ -166,15 +166,13 @@ async function askAI(cfg, q) {
     const t = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
     return t ? String(t).trim() : '';
   };
-  /* 【"模型没返回正文"是 max_tokens 被思考吃光 · 2026-10-31 实测】
-     整场 50 题里 #33、#39 两道栽在这上面：答案本身很短，但模型先想了一大段，
-     300 个 token 的配额全被思维链吃掉，正文就是空的。
-     现在的顺序：① 关思考（考试不需要长推理，快 3 倍）→ ② 服务端不认这个参数就退回普通调用
-     → ③ 还空就把配额提到 2400 再试一次。 */
+  /* 【输出配额给到 8000 · 2026-10-31 法师要求】
+     原来只给 300，整场考试里 #33、#39 两道多选被思维链吃光配额、正文为空。
+     现在 8000：答案本身只有几个字母，这个数纯粹是给"模型先想一段"留的余量。
+     顺序不变：① 关思考（快）→ ② 服务端不认这个参数就退回普通调用。 */
   let text = '';
   try { text = await call({ thinking: { type: 'disabled' } }); } catch (e) { text = await call(null); }
-  if (!text) text = await call({ max_tokens: 2400 });
-  if (!text) throw new Error('模型没返回正文（关了思考、又加了配额，还是空）');
+  if (!text) throw new Error('模型没返回正文（关了思考也空，配额已给到 8000）');
   return text;
 }
 
