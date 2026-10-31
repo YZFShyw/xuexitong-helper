@@ -98,9 +98,11 @@ const DEFAULT_CFG = {
        max = 原来那套（慢、贵、准）
      抄录那一步不受它影响（始终 medium，见 transcribeShots 里的注释）。 */
   thinkMode: 'max',
-  /* 输出上限（含思维链）。32000 是实测"思考吃不满"的值；
-     考试页那种一题一答的小请求可以调小。 */
-  maxTokens: 32000,
+  /* 输出上限（含思维链）。2026-10-31 法师定：默认 5000。
+     单题够用（答案通常只有几个字母 + 一两句理由）。
+     注意：批量问（一次问 5~10 道）时如果出现"最后一道题没有答案"，
+     说明思维链把配额吃完了 —— 把这一项调大（历史上 8000 卡临界、32000 才稳）。 */
+  maxTokens: 5000,
   maxPerChapter: 30,
   stopAtQuiz: false,
   /* 读题方式 —— 三种：
@@ -753,13 +755,13 @@ function buildUser(q) {
    给到 32000 → completion=14914 / reasoning=14906，正文正常出。
    max_tokens 只是上限，不改变模型"想多久"，所以调大不会平白多花钱 ——
    它只消除"思考把配额吃光、正文被挤没"这一种故障。 */
-const MAX_TOKENS = 32000;
+const MAX_TOKENS = 5000;
 
 /* 【思维档位 / 输出配额改成可配置 · 2026-10-31 法师要求】
    以前这两样写死在代码里（恒开 thinking + reasoning_effort:'max' + 32000），
    想快一点、或者想少花钱，只能改代码。现在放进 答题设置.json，控制台里能直接调：
      thinkMode: 'off' | 'low' | 'medium' | 'high' | 'max'   （缺省 max = 原来的行为）
-     maxTokens: 输出上限（含思维链），缺省 32000
+     maxTokens: 输出上限（含思维链），缺省 5000（法师 2026-10-31 定的）
    注意：思考模式不支持 temperature（官方原话"设置参数不会报错，但也不会生效"），
    所以开了思考就不要再传 temperature。 */
 function thinkParams(cfg) {
