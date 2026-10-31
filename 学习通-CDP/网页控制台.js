@@ -757,6 +757,9 @@ async function apiState() {
       model: cfg.model,
       visionModel: cfg.visionModel,
       maxShots: cfg.maxShots,
+      /* 思维档位 / 输出配额（2026-10-31 法师要求做成可调） */
+      thinkMode: cfg.thinkMode || 'max',
+      maxTokens: (quiz.maxTokensOf ? quiz.maxTokensOf(cfg) : cfg.maxTokens),
       keyMask: maskKey(effKey),
       keyFrom: cfg.apiKey ? '配置文件' : (envKey ? '环境变量 DEEPSEEK_API_KEY' : '没配'),
       apiUrl: quiz.apiUrlOf(cfg),
@@ -827,6 +830,20 @@ function saveConfigPatch(patch) {
   if (patch.maxShots !== undefined && patch.maxShots !== null && patch.maxShots !== '') {
     const n = Number(patch.maxShots);
     if (Number.isFinite(n) && n >= 1) { cfg.maxShots = Math.floor(n); changed.push('最多截几张=' + cfg.maxShots); }
+  }
+  /* 【思维档位 / 输出配额】2026-10-31 法师要求做成可调：
+     off = 不要思维链（快）；low/medium/high/max = 越往上越慢越准。
+     抄录那一步不受它影响（始终 medium）。空值 / 认不出的值一律不动（宁可不改）。 */
+  if (patch.thinkMode !== undefined && patch.thinkMode !== null && String(patch.thinkMode).trim()) {
+    const m = String(patch.thinkMode).trim().toLowerCase();
+    if (['off', 'low', 'medium', 'high', 'max'].indexOf(m) >= 0) {
+      cfg.thinkMode = m;
+      changed.push('思维档位=' + m);
+    }
+  }
+  if (patch.maxTokens !== undefined && patch.maxTokens !== null && patch.maxTokens !== '') {
+    const n = Number(patch.maxTokens);
+    if (Number.isFinite(n) && n >= 256 && n <= 200000) { cfg.maxTokens = Math.floor(n); changed.push('输出配额=' + cfg.maxTokens); }
   }
   /* key 单独处理：空字符串 = 不改（不是"清空"）。要清空得显式 deleteKey。 */
   if (patch.deleteKey) { cfg.apiKey = ''; changed.push('API key 已清除'); }
@@ -1673,6 +1690,15 @@ footer{max-width:1200px;margin:0 auto;padding:0 22px 40px;color:var(--dim2);font
           <option value="shot">只用截图 + 看图模型</option>
         </select><span id="readModeDesc"></span></label>
       <label class="f">每章最多问几题<input type="number" id="maxPerChapter" min="1"></label>
+      <label class="f">思维档位（越往上越慢越准）
+        <select id="thinkMode">
+          <option value="off">off（不要思维链，最快）</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="max">max（默认：慢但准）</option>
+        </select></label>
+      <label class="f">输出配额 max_tokens（含思维链）<input type="number" id="maxTokens" min="256" max="200000" step="256"></label>
       <label class="f">AI 模式（问模型答题）
         <select id="useAI"><option value="1">开</option><option value="0">关（一分钱不花）</option></select></label>
       <label class="f">题库模式（先用本地题库答）
@@ -2031,6 +2057,8 @@ function refresh(){
     $('readMode').value = s.cfg.readMode;
     $('readModeDesc').textContent = s.cfg.readModeName || '';
     $('maxPerChapter').value = s.cfg.maxPerChapter;
+    if ($('thinkMode')) $('thinkMode').value = s.cfg.thinkMode || 'max';
+    if ($('maxTokens')) $('maxTokens').value = s.cfg.maxTokens;
     $('autoFill').value = s.cfg.autoFill ? '1' : '0';
     $('stopAtQuiz').value = s.cfg.stopAtQuiz ? '1' : '0';
     if ($('useAI')) $('useAI').value = s.cfg.useAI ? '1' : '0';
@@ -2084,7 +2112,9 @@ function saveCfg(){
     stopAtQuiz: $('stopAtQuiz').value === '1',
     useAI: $('useAI') ? ($('useAI').value === '1') : true,
     useBank: $('useBank') ? ($('useBank').value === '1') : true,
-    maxShots: Number($('maxShots').value)
+    maxShots: Number($('maxShots').value),
+    thinkMode: $('thinkMode') ? $('thinkMode').value : undefined,
+    maxTokens: $('maxTokens') ? Number($('maxTokens').value) : undefined
   }).then(function(r){
     if (!r.ok){ alert(r.error || '保存失败'); return; }
     hint('已保存：' + (r.changed||[]).join('、'));

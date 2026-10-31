@@ -154,7 +154,12 @@ async function askAI(cfg, q) {
     { role: 'user', content: lines.join('\n') },
   ];
   const call = async (extra) => {
-    const body = Object.assign({ model: cfg.model, max_tokens: 8000, temperature: 0, messages: msgs }, extra || {});
+    const body = Object.assign({
+      model: cfg.model,
+      max_tokens: Q.maxTokensOf(cfg),
+      ...Q.thinkParams(cfg),
+      messages: msgs,
+    }, extra || {});
     const r = await fetch(Q.apiUrlOf(cfg), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
@@ -166,13 +171,17 @@ async function askAI(cfg, q) {
     const t = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
     return t ? String(t).trim() : '';
   };
-  /* 【输出配额给到 8000 · 2026-10-31 法师要求】
-     原来只给 300，整场考试里 #33、#39 两道多选被思维链吃光配额、正文为空。
-     现在 8000：答案本身只有几个字母，这个数纯粹是给"模型先想一段"留的余量。
-     顺序不变：① 关思考（快）→ ② 服务端不认这个参数就退回普通调用。 */
+  /* 【思维档位和配额都从 答题设置.json 读 · 2026-10-31】
+     原来这里写死 thinking:disabled + max_tokens:8000，改不动。
+     现在跟放课那条链共用同一份配置（控制台里调 thinkMode / maxTokens）。
+     退回逻辑只看"参数不认"这一种错：401/429/超时直接抛，别被伪装成"模型没返回正文"。 */
   let text = '';
-  try { text = await call({ thinking: { type: 'disabled' } }); } catch (e) { text = await call(null); }
-  if (!text) throw new Error('模型没返回正文（关了思考也空，配额已给到 8000）');
+  try { text = await call(null); } catch (e) {
+    const msg = String((e && e.message) || e);
+    if (!/API 400/.test(msg)) throw e;
+    text = await call({ thinking: { type: 'disabled' } });
+  }
+  if (!text) throw new Error('模型没返回正文（配额 ' + Q.maxTokensOf(cfg) + '，档位 ' + String(cfg.thinkMode || 'max') + '）');
   return text;
 }
 

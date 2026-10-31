@@ -92,6 +92,15 @@ const DEFAULT_CFG = {
        deepseek-v4-pro    DeepSeek-V4-Pro，更强更贵，不支持看图
      答题用 flash 就够，而且它还能兼任"截图读题"那个看图模型。 */
   model: 'deepseek-flash',
+  /* 思维档位：off / low / medium / high / max。
+     以前写死 max，现在可以在网页控制台里调（2026-10-31 法师要求）：
+       off = 不要思维链（快，简单题够用；多步推理题会掉准确率）
+       max = 原来那套（慢、贵、准）
+     抄录那一步不受它影响（始终 medium，见 transcribeShots 里的注释）。 */
+  thinkMode: 'max',
+  /* 输出上限（含思维链）。32000 是实测"思考吃不满"的值；
+     考试页那种一题一答的小请求可以调小。 */
+  maxTokens: 32000,
   maxPerChapter: 30,
   stopAtQuiz: false,
   /* 读题方式 —— 三种：
@@ -746,6 +755,24 @@ function buildUser(q) {
    它只消除"思考把配额吃光、正文被挤没"这一种故障。 */
 const MAX_TOKENS = 32000;
 
+/* 【思维档位 / 输出配额改成可配置 · 2026-10-31 法师要求】
+   以前这两样写死在代码里（恒开 thinking + reasoning_effort:'max' + 32000），
+   想快一点、或者想少花钱，只能改代码。现在放进 答题设置.json，控制台里能直接调：
+     thinkMode: 'off' | 'low' | 'medium' | 'high' | 'max'   （缺省 max = 原来的行为）
+     maxTokens: 输出上限（含思维链），缺省 32000
+   注意：思考模式不支持 temperature（官方原话"设置参数不会报错，但也不会生效"），
+   所以开了思考就不要再传 temperature。 */
+function thinkParams(cfg) {
+  const mode = String((cfg && cfg.thinkMode) || 'max').toLowerCase();
+  if (mode === 'off' || mode === 'none' || mode === 'disabled') return { thinking: { type: 'disabled' } };
+  const effort = ['low', 'medium', 'high', 'max'].indexOf(mode) >= 0 ? mode : 'max';
+  return { thinking: { type: 'enabled' }, reasoning_effort: effort };
+}
+function maxTokensOf(cfg) {
+  const n = Number(cfg && cfg.maxTokens);
+  return (Number.isFinite(n) && n >= 256) ? Math.floor(n) : MAX_TOKENS;
+}
+
 /* 【给每次 API 调用加超时】
    实测踩坑：驱动器在"视频播完 → 处理题目卡"那一步冻了 6 分钟 ——
    日志不再写、CPU 也不动，原因就是 fetch 没设超时：
@@ -877,13 +904,12 @@ async function askOne(q, cfg) {
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.apiKey },
     body: JSON.stringify({
       model: cfg.model,
-      max_tokens: MAX_TOKENS,
-      /* 思考模式：开，档位 max —— 答题这一步要的就是准确率，慢一点贵一点认了。
-         注意：思考模式不支持 temperature，官方原话是「设置参数不会报错，但也不会生效」。
-         所以这里干脆不传 —— 留一个不生效的参数只会误导人（原来那行 temperature: 0
-         看着像在保证答案稳定，其实一点用都没有）。 */
-      thinking: { type: 'enabled' },
-      reasoning_effort: 'max',
+      max_tokens: maxTokensOf(cfg),
+      /* 思考档位从配置读（thinkMode / maxTokens，控制台可调）。
+         答题这一步默认 max 档 —— 要的就是准确率，慢一点贵一点认了。
+         注意：思考模式不支持 temperature，官方原话是「设置参数不会报错，但也不会生效」，
+         所以这里不传 temperature —— 留一个不生效的参数只会误导人。 */
+      ...thinkParams(cfg),
       messages: [
         { role: 'system', content: SYSTEM },
         { role: 'user', content: buildUser(q) }
@@ -904,12 +930,11 @@ async function askOne(q, cfg) {
 async function askRaw(userText, cfg) {
   const payload = JSON.stringify({
     model: cfg.model,
-    max_tokens: MAX_TOKENS,
-    /* 思考模式：开，档位 max（和 askOne 保持一致 —— 这是真正出答案的那一步）
-       同样必须给 max_tokens：题多的时候（5 道以上）思维链一长，
-       正文就容易被截断，表现就是"最后一道题没有答案"。 */
-    thinking: { type: 'enabled' },
-    reasoning_effort: 'max',
+    max_tokens: maxTokensOf(cfg),
+    /* 思考档位同样从配置读（和 askOne 一套，见 thinkParams 上面那条注释）。
+       配额必须够：题多的时候（5 道以上）思维链一长，正文容易被截断，
+       表现就是"最后一道题没有答案"。 */
+    ...thinkParams(cfg),
     messages: [
       { role: 'system', content: SYSTEM },
       { role: 'user', content: userText }
@@ -1453,10 +1478,10 @@ async function transcribeShots(cfg, shots) {
       model: cfg.visionModel || 'deepseek-flash',
       /* 抄录也要给足输出配额：一张截图一道题，题目多了正文就长，
          配额一紧会被截在最后一道题上（"截图里明明有 5 道，抄出来只有 4 道"）。 */
-      max_tokens: MAX_TOKENS,
-      /* 思考模式：开，档位 **medium**（2026-10-19 从 high 降下来）。
-         high 下 10 道公式题时思维链把输出额度烧掉一半，抄录被截在 6 题 →
-         transcriptionTrust 判"不可信" → 整章不问 AI、不填（映射 10 题全丢就是这个）。
+      max_tokens: maxTokensOf(cfg),
+      /* 抄录这一步**不跟** thinkMode：它要的是"把图上的字认全"，不是解题。
+         2026-10-19 从 high 降到 medium —— high 下 10 道公式题时思维链把输出额度烧掉一半，
+         抄录被截在 6 题 → transcriptionTrust 判"不可信" → 整章不问 AI、不填。
          medium 实测足够认字，正文额度留给题目本身；仍远好于 disabled（会漏小字）。 */
       thinking: { type: 'enabled' },
       reasoning_effort: 'medium',
@@ -1512,9 +1537,9 @@ async function askWithShots(cfg, shots, text) {
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + cfg.apiKey },
     body: JSON.stringify({
       model: cfg.visionModel || 'deepseek-flash',
-      max_tokens: MAX_TOKENS,
-      thinking: { type: 'enabled' },
-      reasoning_effort: 'max',        /* 这一步是**解题**（答案决定对错），跟 askRaw 一样给 max */
+      max_tokens: maxTokensOf(cfg),
+      /* 这一步是**解题**（答案决定对错），跟 askRaw 一样跟 thinkMode 走 */
+      ...thinkParams(cfg),
       messages: [{ role: 'user', content }]
     })
   }, { timeoutMs: VISION_TIMEOUT_MS });
@@ -4330,6 +4355,8 @@ function makeHelper(cfg, deps) {
 module.exports = {
   apiUrlOf, maskApiUrl, API_URL,
   loadConfig, saveConfig, makeHelper, parseAnswer,
+  /* 思维档位 / 输出配额（2026-10-31）：控制台调、填考试.js 也读同一份 */
+  thinkParams, maxTokensOf,
   decodeObf, hasFontTable, loadFontTable, fontTableMatches,
   /* 下面几个是为了能单独测"截图读题"和"填进页面"这两条路而导出的 */
   grabShots, transcribeShots, splitTranscribed, partToPageNo, scrollToQuestion, countQuestions, askRaw, askWithShots, titleShotPlan,
