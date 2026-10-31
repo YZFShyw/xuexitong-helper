@@ -149,26 +149,33 @@ const SYSTEM = [
 async function askAI(cfg, q) {
   const lines = ['题型：' + q.type, '题干：' + q.stem, '选项：'];
   for (const o of q.opts) lines.push('  ' + (o.show || '?') + '. ' + o.text);
-  const body = {
-    model: cfg.model,
-    max_tokens: 300,
-    temperature: 0,
-    messages: [
-      { role: 'system', content: SYSTEM },
-      { role: 'user', content: lines.join('\n') },
-    ],
+  const msgs = [
+    { role: 'system', content: SYSTEM },
+    { role: 'user', content: lines.join('\n') },
+  ];
+  const call = async (extra) => {
+    const body = Object.assign({ model: cfg.model, max_tokens: 1200, temperature: 0, messages: msgs }, extra || {});
+    const r = await fetch(Q.apiUrlOf(cfg), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(45000),
+    });
+    if (!r.ok) throw new Error('API ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 160));
+    const j = await r.json();
+    const t = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+    return t ? String(t).trim() : '';
   };
-  const r = await fetch(Q.apiUrlOf(cfg), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + cfg.apiKey },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(45000),
-  });
-  if (!r.ok) throw new Error('API ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 160));
-  const j = await r.json();
-  const text = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-  if (!text) throw new Error('模型没返回正文');
-  return String(text).trim();
+  /* 【"模型没返回正文"是 max_tokens 被思考吃光 · 2026-10-31 实测】
+     整场 50 题里 #33、#39 两道栽在这上面：答案本身很短，但模型先想了一大段，
+     300 个 token 的配额全被思维链吃掉，正文就是空的。
+     现在的顺序：① 关思考（考试不需要长推理，快 3 倍）→ ② 服务端不认这个参数就退回普通调用
+     → ③ 还空就把配额提到 2400 再试一次。 */
+  let text = '';
+  try { text = await call({ thinking: { type: 'disabled' } }); } catch (e) { text = await call(null); }
+  if (!text) text = await call({ max_tokens: 2400 });
+  if (!text) throw new Error('模型没返回正文（关了思考、又加了配额，还是空）');
+  return text;
 }
 
 /* 页面写的是「多选题 / 判断题」，而 parseAnswer 只认「多选 / 判断 / 单选」——
