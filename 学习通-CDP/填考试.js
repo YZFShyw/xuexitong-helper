@@ -168,21 +168,23 @@ async function askAI(cfg, q) {
     });
     if (!r.ok) throw new Error('API ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 160));
     const j = await r.json();
-    const t = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-    return t ? String(t).trim() : '';
+    const msg = (j && j.choices && j.choices[0] && j.choices[0].message) || {};
+    const t = msg.content;
+    /* 思维链（reasoning_content）也带出去：2026-11-06 起跟 答题助手 一样落盘 */
+    return { text: t ? String(t).trim() : '', reasoning: String(msg.reasoning_content || '') };
   };
   /* 【思维档位和配额都从 答题设置.json 读 · 2026-10-31】
      原来这里写死 thinking:disabled + max_tokens:8000，改不动。
      现在跟放课那条链共用同一份配置（控制台里调 thinkMode / maxTokens）。
      退回逻辑只看"参数不认"这一种错：401/429/超时直接抛，别被伪装成"模型没返回正文"。 */
-  let text = '';
-  try { text = await call(null); } catch (e) {
+  let out = { text: '', reasoning: '' };
+  try { out = await call(null); } catch (e) {
     const msg = String((e && e.message) || e);
     if (!/API 400/.test(msg)) throw e;
-    text = await call({ thinking: { type: 'disabled' } });
+    out = await call({ thinking: { type: 'disabled' } });
   }
-  if (!text) throw new Error('模型没返回正文（配额 ' + Q.maxTokensOf(cfg) + '，档位 ' + String(cfg.thinkMode || 'max') + '）');
-  return text;
+  if (!out.text) throw new Error('模型没返回正文（配额 ' + Q.maxTokensOf(cfg) + '，档位 ' + String(cfg.thinkMode || 'max') + '）');
+  return out;
 }
 
 /* 页面写的是「多选题 / 判断题」，而 parseAnswer 只认「多选 / 判断 / 单选」——
@@ -262,7 +264,9 @@ function pickTargets(q, answer, type) {
       '   选项 ' + first.opts.length + ' 个   已填=' + (first.answer || '（空）'));
 
   if (DRY) {
-    const raw = await askAI(cfg, first);
+    const ai = await askAI(cfg, first);
+    const raw = ai.text;
+    if (cfg.saveThink !== false) Q.logThink({ type: first.type, stem: first.stem }, { answer: null }, ai.reasoning, ai.text);
     const parsed = Q.parseAnswer(raw, normType(first.type));
     const pick = pickTargets(first, parsed.answer, normType(first.type));
     log('── dry run（一个都没点）');
@@ -298,8 +302,10 @@ function pickTargets(q, answer, type) {
     } else {
       let answer = null, why = '';
       try {
-        const raw = await askAI(cfg, q);
-        answer = Q.parseAnswer(raw, normType(q.type)).answer;
+        const ai = await askAI(cfg, q);
+        answer = Q.parseAnswer(ai.text, normType(q.type)).answer;
+        /* 思维链落盘（跟 答题助手 同一个文件、同一套格式） */
+        if (cfg.saveThink !== false) Q.logThink({ type: q.type, stem: q.stem }, { answer }, ai.reasoning, ai.text);
       } catch (e) { why = '问 AI 失败：' + (e.message || e); }
       if (!answer) { failed++; log('#' + no + ' ⚠ ' + (why || '模型答不出')); }
       else {

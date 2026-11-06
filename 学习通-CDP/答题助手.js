@@ -103,6 +103,10 @@ const DEFAULT_CFG = {
      注意：批量问（一次问 5~10 道）时如果出现"最后一道题没有答案"，
      说明思维链把配额吃完了 —— 把这一项调大（历史上 8000 卡临界、32000 才稳）。 */
   maxTokens: 5000,
+  /* 【把模型的思维链也记下来】2026-11-06 法师要求。
+     开（缺省）= 每题把 reasoning_content 追加到 logs\思维链-<时间戳>.txt（单题最多 4000 字）；
+     关 = 不落盘。体积参考：一道题约 3000 字，50 题约 150 KB。 */
+  saveThink: true,
   maxPerChapter: 30,
   stopAtQuiz: false,
   /* 读题方式 —— 三种：
@@ -177,13 +181,48 @@ function emptyNote() {
     '    想少碰到：把「每章最多问几题」调小，或者改用不带思考模式的模型。';
 }
 function pickText(j) {
-  const text = j?.choices?.[0]?.message?.content;
-  if (text && String(text).trim()) return { text: String(text), empty: false };
+  const msg = (j && j.choices && j.choices[0] && j.choices[0].message) || {};
+  /* 【思维链也带出去 · 2026-11-06 法师要求】
+     DeepSeek 把"想的过程"放在 message.reasoning_content 里，正文在 message.content。
+     原来这里只取 content，思维链直接丢了 —— 出问题（答错、正文为空）时完全看不到它当时怎么想的。
+     现在原样带出来，由调用方按 saveThink 决定写不写盘（见 logThink）。 */
+  const reasoning = String(msg.reasoning_content || '');
+  const text = msg.content;
+  if (text && String(text).trim()) return { text: String(text), reasoning, empty: false };
   const u = j && j.usage;
   return {
-    text: '', empty: true,
+    text: '', reasoning, empty: true,
     note: emptyNote() + (u ? ('\n    （本次用量：' + JSON.stringify(u) + '）') : '')
   };
+}
+
+/* 【思维链落盘】默认跟着 答题设置.json 的 saveThink（缺省开）。
+   一跑一个大文件：logs\思维链-<时间戳>.txt，每题一段（题号/题型/答案/思维链/正文）。
+   体积控制：单题思维链最多记 4000 字（超了截断并标出原长），否则一份 100 题的卷子能写几百 KB。 */
+let THINK_LOG_FILE = '';
+function logThink(q, p, reasoning, raw) {
+  if (!reasoning) return;
+  try {
+    if (!THINK_LOG_FILE) {
+      const d = new Date().toISOString().replace(/[:.]/g, '-');
+      THINK_LOG_FILE = path.join(__dirname, 'logs', '思维链-' + d + '.txt');
+      try { fs.mkdirSync(path.dirname(THINK_LOG_FILE), { recursive: true }); } catch (e) { /* 已存在 */ }
+      fs.writeFileSync(THINK_LOG_FILE,
+        '思维链记录（模型生成，仅供事后分析，不参与判分）\n' +
+        '生成时间：' + new Date().toLocaleString('zh-CN') + '\n' +
+        '说明：每题一段 —— 题干 / 模型答案 / reasoning_content（思维链）/ content（正文）\n' +
+        '='.repeat(60) + '\n\n', 'utf8');
+    }
+    const LIMIT = 4000;
+    const body = reasoning.length > LIMIT
+      ? (reasoning.slice(0, LIMIT) + '\n…（截断，原文 ' + reasoning.length + ' 字）')
+      : reasoning;
+    fs.appendFileSync(THINK_LOG_FILE,
+      '【' + (q && q.type ? q.type : '?') + '】' + String((q && q.stem) || '').replace(/\s+/g, ' ').slice(0, 160) + '\n' +
+      '答案：' + (p && p.answer != null ? p.answer : '（无）') + '\n' +
+      '---- 思维链（' + reasoning.length + ' 字）----\n' + body + '\n' +
+      '---- 正文 ----\n' + String(raw || '').trim().slice(0, 800) + '\n\n', 'utf8');
+  } catch (e) { /* 写不进去不影响答题 */ }
 }
 
 /* 【配置读坏了要说出来，不能装作"一切正常"】
@@ -4139,6 +4178,7 @@ function makeHelper(cfg, deps) {
               const a = await askOne(qq, cfg);
               QS.addUsage(usage, a && a.usage);
               p = parseAnswer(a.text, q.type);
+              if (cfg.saveThink !== false) logThink(qq, p, a && a.reasoning, a && a.text);
               lines.push('      → 答案：' + (p.answer === null ? '（模型无法确定）' : p.answer));
               if (p.reason) lines.push('        理由：' + p.reason);
               /* 空正文要说清是"模型没返回"而不是"模型不确定" —— 两者处理方式不同：
@@ -4359,6 +4399,8 @@ module.exports = {
   loadConfig, saveConfig, makeHelper, parseAnswer,
   /* 思维档位 / 输出配额（2026-10-31）：控制台调、填考试.js 也读同一份 */
   thinkParams, maxTokensOf,
+  /* 思维链落盘（2026-11-06）：填考试.js 复用同一个写盘函数，格式才一致 */
+  logThink,
   decodeObf, hasFontTable, loadFontTable, fontTableMatches,
   /* 下面几个是为了能单独测"截图读题"和"填进页面"这两条路而导出的 */
   grabShots, transcribeShots, splitTranscribed, partToPageNo, scrollToQuestion, countQuestions, askRaw, askWithShots, titleShotPlan,
